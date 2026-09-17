@@ -2,6 +2,8 @@ import os
 import io
 import hashlib
 import datetime as dt
+import uuid
+import secrets
 from pathlib import Path
 from functools import wraps
 
@@ -27,6 +29,7 @@ def create_app():
        raise RuntimeError("SECRET_KEY environment variable must be set")
     app.config["SECRET_KEY"] = secret_key
     app.config["STORAGE_DIR"] = Path(os.environ.get("STORAGE_DIR", "./storage")).resolve()
+    app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
     app.config["TOKEN_TTL_SECONDS"] = int(os.environ.get("TOKEN_TTL_SECONDS", "86400"))
 
     app.config["DB_USER"] = os.environ.get("DB_USER", "tatou")
@@ -163,18 +166,43 @@ def create_app():
         if "file" not in request.files:
             return jsonify({"error": "file is required (multipart/form-data)"}), 400
         file = request.files["file"]
-        if not file or file.filename == "":
-            return jsonify({"error": "empty filename"}), 400
+        original_name = file.filename or ""
+        safe_name = secure_filename(original_name)
 
-        fname = file.filename
+        if not safe_name:
+            return jsonify({"error": "invalid filename"}), 400
 
-        user_dir = app.config["STORAGE_DIR"] / "files" / g.user["login"]
+        # Only PDF files are supported by this application.
+        if Path(safe_name).suffix.lower() != ".pdf":
+            return jsonify({"error": "only PDF files are allowed"}), 415
+
+        if file.mimetype != "application/pdf":
+            return jsonify({"error": "invalid PDF content type"}), 415
+
+    # Do not trust the extension or Content-Type alone.
+        header = file.stream.read(5)
+        file.stream.seek(0)
+        if header != b"%PDF-":
+            return jsonify({"error": "invalid PDF file"}), 415
+
+        final_name = (request.form.get("name") or safe_name).strip()
+        if not final_name or len(final_name) > 255:
+            return jsonify({"error": "invalid document name"}), 400
+
+        # Use the numeric user ID, not the user-controlled login, as a directory name.
+        user_dir = app.config["STORAGE_DIR"] / "files" / str(int(g.user["id"]))
         user_dir.mkdir(parents=True, exist_ok=True)
 
-        ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
-        final_name = request.form.get("name") or fname
-        stored_name = f"{ts}__{fname}"
-        stored_path = user_dir / stored_name
+        # The physical filename is generated entirely by the server.
+        stored_name = f"{uuid.uuid4().hex}.pdf"
+        stored_path = (user_dir / stored_name).resolve()
+
+    # Defence in depth: verify the final destination remains inside STORAGE_DIR.
+        try:
+            stored_path.relative_to(app.config["STORAGE_DIR"])
+        except ValueError:
+            return jsonify({"error": "invalid storage path"}), 500
+
         file.save(stored_path)
 
         sha_hex = _sha256_file(stored_path)
@@ -550,10 +578,10 @@ def create_app():
                     text("""
                         SELECT id, name, path
                         FROM Documents
-                        WHERE id = :id
+                        WHERE id = :id AND ownerid = :uid
                         LIMIT 1
                     """),
-                    {"id": doc_id},
+                    {"id": doc_id, "uid": int(g.user["id"])},
                 ).first()
         except Exception as e:
             return jsonify({"error": f"database error: {str(e)}"}), 503
@@ -601,23 +629,38 @@ def create_app():
             return jsonify({"error": f"watermarking failed: {e}"}), 500
 
         # build destination file name: "<original_name>__<intended_to>.pdf"
-        base_name = Path(row.name or file_path.name).stem
-        intended_slug = secure_filename(intended_for)
+        # Create safe, bounded filename components.
+        base_slug = secure_filename(
+            Path(row.name or file_path.name).stem
+        )[:80] or "document"
+
+        intended_slug = secure_filename(intended_for)[:80] or "recipient"
+
+        # A public download link must be unpredictable.
+        # token_urlsafe(32) provides 256 bits of randomness.
+        link_token = secrets.token_urlsafe(32)
+
         dest_dir = file_path.parent / "watermarks"
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        candidate = f"{base_name}__{intended_slug}.pdf"
-        dest_path = dest_dir / candidate
+        # Include the random token so separate versions never overwrite each other.
+        candidate = f"{base_slug}__{intended_slug}__{link_token}.pdf"
+        dest_path = (dest_dir / candidate).resolve()
 
-        # write bytes
         try:
-            with dest_path.open("wb") as f:
-                f.write(wm_bytes)
-        except Exception as e:
-            return jsonify({"error": f"failed to write watermarked file: {e}"}), 500
+            dest_path.relative_to(Path(app.config["STORAGE_DIR"]).resolve())
+        except ValueError:
+            return jsonify({"error": "invalid version storage path"}), 500
 
-        # link token = sha1(watermarked_file_name)
-        link_token = hashlib.sha1(candidate.encode("utf-8")).hexdigest()
+        #  Write the generated watermarked PDF without overwriting an existing file.
+        try:
+            with dest_path.open("xb") as f:
+                f.write(wm_bytes)
+        except FileExistsError:
+            return jsonify({"error": "version file already exists"}), 409
+        except OSError:
+            app.logger.exception("Failed to write watermarked PDF")
+            return jsonify({"error": "failed to write watermarked file"}), 500
 
         try:
             with get_engine().begin() as conn:
@@ -712,9 +755,9 @@ def create_app():
                     text("""
                         SELECT id, name, path
                         FROM Documents
-                        WHERE id = :id
+                        WHERE id = :id AND ownerid = :uid
                     """),
-                    {"id": doc_id},
+                    {"id": doc_id, "uid": int(g.user["id"])},
                 ).first()
         except Exception as e:
             return jsonify({"error": f"database error: {str(e)}"}), 503
