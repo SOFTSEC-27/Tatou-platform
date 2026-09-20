@@ -4,6 +4,7 @@ import hashlib
 import datetime as dt
 import uuid
 import secrets
+import threading
 from pathlib import Path
 from functools import wraps
 
@@ -14,6 +15,8 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
+
+from rmap import RMAPError, RMAPServer
 
 
 import watermarking_utils as WMUtils
@@ -37,6 +40,35 @@ def create_app():
     app.config["DB_HOST"] = os.environ.get("DB_HOST", "db")
     app.config["DB_PORT"] = int(os.environ.get("DB_PORT", "3306"))
     app.config["DB_NAME"] = os.environ.get("DB_NAME", "tatou")
+
+    #--------RMAP configuration--------
+    app.config["RMAP_SERVER_PUBLIC_KEY_PATH"] = os.environ.get(
+        "RMAP_SERVER_PUBLIC_KEY_PATH"
+    )
+    app.config["RMAP_SERVER_PRIVATE_KEY_PATH"] = os.environ.get(
+        "RMAP_SERVER_PRIVATE_KEY_PATH"
+    )
+    app.config["RMAP_PRIVATE_KEY_PASSPHRASE"] = os.environ.get(
+        "RMAP_PRIVATE_KEY_PASSPHRASE"
+    )
+    app.config["RMAP_IDENTITIES_DIR"] = os.environ.get("RMAP_IDENTITIES_DIR")
+    app.config["RMAP_DOCUMENT_ID"] = os.environ.get("RMAP_DOCUMENT_ID")
+    app.config["RMAP_LINK_PREFIX"] = os.environ.get(
+        "RMAP_LINK_PREFIX",
+        "/api/get-version/",
+    )
+    app.config["RMAP_WATERMARK_METHOD"] = os.environ.get(
+        "RMAP_WATERMARK_METHOD",
+        "layered-identity-v1",
+    )
+    app.config["RMAP_WATERMARK_POSITION"] = os.environ.get(
+        "RMAP_WATERMARK_POSITION",
+        "center",
+    )
+    app.config["WATERMARK_HMAC_KEY"] = os.environ.get("WATERMARK_HMAC_KEY")
+
+    # RMAP v1.0.2 keeps handshake state in memory.
+    app.extensions["rmap_lock"] = threading.RLock()
 
     app.config["STORAGE_DIR"].mkdir(parents=True, exist_ok=True)
 
@@ -85,6 +117,70 @@ def create_app():
                 h.update(chunk)
         return h.hexdigest()
 
+    def get_rmap_server() -> RMAPServer:
+        """Create and cache the configured RMAP server on first use."""
+        lock = app.extensions["rmap_lock"]
+
+        with lock:
+            cached_server = app.extensions.get("rmap_server")
+            if cached_server is not None:
+                return cached_server
+
+            required_config = {
+                "RMAP_SERVER_PUBLIC_KEY_PATH": app.config.get(
+                    "RMAP_SERVER_PUBLIC_KEY_PATH"
+                ),
+                "RMAP_SERVER_PRIVATE_KEY_PATH": app.config.get(
+                    "RMAP_SERVER_PRIVATE_KEY_PATH"
+                ),
+                "RMAP_IDENTITIES_DIR": app.config.get("RMAP_IDENTITIES_DIR"),
+                "RMAP_DOCUMENT_ID": app.config.get("RMAP_DOCUMENT_ID"),
+                "WATERMARK_HMAC_KEY": app.config.get("WATERMARK_HMAC_KEY"),
+            }
+            missing = [
+                name
+                for name, value in required_config.items()
+                if not value
+            ]
+            if missing:
+                raise RuntimeError(
+                    "RMAP is not configured; missing: "
+                    + ", ".join(sorted(missing))
+                )
+
+            public_key_path = Path(
+                app.config["RMAP_SERVER_PUBLIC_KEY_PATH"]
+            ).resolve()
+            private_key_path = Path(
+                app.config["RMAP_SERVER_PRIVATE_KEY_PATH"]
+            ).resolve()
+            identities_dir = Path(
+                app.config["RMAP_IDENTITIES_DIR"]
+            ).resolve()
+
+            if not public_key_path.is_file():
+                raise RuntimeError("RMAP server public key is unavailable")
+            if not private_key_path.is_file():
+                raise RuntimeError("RMAP server private key is unavailable")
+            if not identities_dir.is_dir():
+                raise RuntimeError("RMAP identities directory is unavailable")
+
+            rmap_server = RMAPServer(
+                server_public_key_path=public_key_path,
+                server_private_key_path=private_key_path,
+                passphrase=(
+                    app.config.get("RMAP_PRIVATE_KEY_PASSPHRASE") or None
+                ),
+                linkPrefix=app.config["RMAP_LINK_PREFIX"],
+            )
+            rmap_server.loadIdentities(identities_dir)
+
+            if not rmap_server.identities:
+                raise RuntimeError("RMAP identities directory contains no keys")
+
+            app.extensions["rmap_server"] = rmap_server
+            return rmap_server
+
     # --- Routes ---
     
     @app.route("/<path:filename>")
@@ -104,6 +200,287 @@ def create_app():
         except Exception:
             db_ok = False
         return jsonify({"message": "The server is up and running.", "db_connected": db_ok}), 200
+
+    # POST /api/rmap-initiate
+    # Accept raw RMAP msg1 and return raw encrypted resp1.
+    @app.post("/api/rmap-initiate")
+    def rmap_initiate():
+        if not request.is_json:
+            return jsonify({"error": "JSON request body required"}), 400
+
+        msg1 = request.get_json(silent=True)
+        if not isinstance(msg1, dict):
+            return jsonify({"error": "RMAP message must be a JSON object"}), 400
+
+        try:
+            rmap_server = get_rmap_server()
+
+            # RMAP keeps handshake state in memory, so access is serialized.
+            with app.extensions["rmap_lock"]:
+                _identity, resp1 = rmap_server.receiveMsg1(msg1)
+
+            # Do not return identity separately; resp1 is encrypted for the
+            # authenticated client's public key.
+            return jsonify(resp1), 200
+
+        except RuntimeError as exc:
+            # Missing/unavailable key configuration is a server-side problem.
+            app.logger.warning("RMAP service unavailable: %s", exc)
+            return jsonify({"error": "RMAP service unavailable"}), 503
+
+        except RMAPError as exc:
+            # Use one generic response so callers cannot enumerate identities.
+            app.logger.warning(
+                "RMAP initiate rejected: %s",
+                type(exc).__name__,
+            )
+            return jsonify({"error": "RMAP authentication failed"}), 400
+
+        except Exception:
+            app.logger.exception("Unexpected RMAP initiate failure")
+            return jsonify({"error": "RMAP request processing failed"}), 500
+
+    # POST /api/rmap-get-link
+    # Accept raw RMAP msg2, generate an identity-watermarked PDF,
+    # store the version, and return the encrypted download link.
+    @app.post("/api/rmap-get-link")
+    def rmap_get_link():
+        if not request.is_json:
+            return jsonify({"error": "JSON request body required"}), 400
+
+        msg2 = request.get_json(silent=True)
+        if not isinstance(msg2, dict):
+            return jsonify({"error": "RMAP message must be a JSON object"}), 400
+
+        # Complete RMAP authentication and obtain the authenticated identity.
+        try:
+            rmap_server = get_rmap_server()
+
+            with app.extensions["rmap_lock"]:
+                identity, expected_link, resp2 = rmap_server.receiveMsg2(msg2)
+
+        except RuntimeError as exc:
+            app.logger.warning(
+                "RMAP service unavailable during msg2: %s",
+                type(exc).__name__,
+            )
+            return jsonify({"error": "RMAP service unavailable"}), 503
+
+        except RMAPError as exc:
+            app.logger.warning(
+                "RMAP get-link rejected: %s",
+                type(exc).__name__,
+            )
+            return jsonify({"error": "RMAP authentication failed"}), 400
+
+        except Exception:
+            app.logger.exception("Unexpected RMAP msg2 failure")
+            return jsonify({"error": "RMAP request processing failed"}), 500
+
+        # Defensive validation. RMAP v1.0.2 normally returns a 32-character
+        # hexadecimal link.
+        if not isinstance(identity, str) or not identity:
+            app.logger.error("RMAP returned an invalid identity")
+            return jsonify({"error": "RMAP request processing failed"}), 500
+
+        if (
+            not isinstance(expected_link, str)
+            or len(expected_link) != 32
+            or not all(
+                char in "0123456789abcdefABCDEF"
+                for char in expected_link
+            )
+        ):
+            app.logger.error("RMAP returned an invalid expected link")
+            return jsonify({"error": "RMAP request processing failed"}), 500
+
+        try:
+            document_id = int(app.config["RMAP_DOCUMENT_ID"])
+        except (TypeError, ValueError):
+            app.logger.error("RMAP_DOCUMENT_ID is invalid")
+            return jsonify({"error": "RMAP service unavailable"}), 503
+
+        # Look up the configured source PDF. Also detect an already-created
+        # version so a repeated valid request does not create another file.
+        try:
+            with get_engine().connect() as conn:
+                document_row = conn.execute(
+                    text("""
+                        SELECT id, path
+                        FROM Documents
+                        WHERE id = :id
+                        LIMIT 1
+                    """),
+                    {"id": document_id},
+                ).first()
+
+                existing_version = conn.execute(
+                    text("""
+                        SELECT id, path
+                        FROM Versions
+                        WHERE documentid = :documentid
+                          AND link = :link
+                          AND intended_for = :identity
+                        LIMIT 1
+                    """),
+                    {
+                        "documentid": document_id,
+                        "link": expected_link,
+                        "identity": identity,
+                    },
+                ).first()
+
+        except Exception:
+            app.logger.exception("RMAP document lookup failed")
+            return jsonify({"error": "database error"}), 503
+
+        if not document_row:
+            app.logger.error("Configured RMAP document was not found")
+            return jsonify({"error": "RMAP document unavailable"}), 503
+
+        storage_root = Path(app.config["STORAGE_DIR"]).resolve()
+
+        if existing_version:
+            try:
+                existing_path = _safe_resolve_under_storage(
+                    str(existing_version.path),
+                    storage_root,
+                )
+            except RuntimeError:
+                app.logger.error("Existing RMAP version path is invalid")
+                return jsonify({"error": "RMAP version unavailable"}), 500
+
+            if existing_path.exists():
+                return jsonify(resp2), 200
+
+            app.logger.error("Existing RMAP version file is missing")
+            return jsonify({"error": "RMAP version unavailable"}), 500
+
+        # Resolve the configured source document safely inside STORAGE_DIR.
+        try:
+            file_path = _safe_resolve_under_storage(
+                str(document_row.path),
+                storage_root,
+            )
+        except RuntimeError:
+            app.logger.error("Configured RMAP document path is invalid")
+            return jsonify({"error": "RMAP document unavailable"}), 500
+
+        if not file_path.exists() or not file_path.is_file():
+            app.logger.error("Configured RMAP document file is missing")
+            return jsonify({"error": "RMAP document unavailable"}), 503
+
+        method = app.config["RMAP_WATERMARK_METHOD"]
+        position = app.config["RMAP_WATERMARK_POSITION"]
+        watermark_key = app.config["WATERMARK_HMAC_KEY"]
+
+        # Confirm that the selected watermark implementation supports this PDF.
+        try:
+            applicable = WMUtils.is_watermarking_applicable(
+                method=method,
+                pdf=str(file_path),
+                position=position,
+            )
+        except Exception:
+            app.logger.exception("RMAP watermark applicability check failed")
+            return jsonify({"error": "watermark processing failed"}), 500
+
+        if applicable is False:
+            return jsonify({"error": "watermarking method not applicable"}), 400
+
+        # The authenticated RMAP identity becomes the protected watermark value.
+        try:
+            watermarked_bytes = WMUtils.apply_watermark(
+                pdf=str(file_path),
+                secret=identity,
+                key=watermark_key,
+                method=method,
+                position=position,
+            )
+
+            if (
+                not isinstance(watermarked_bytes, (bytes, bytearray))
+                or len(watermarked_bytes) == 0
+            ):
+                raise RuntimeError("watermarking produced no output")
+
+        except Exception:
+            app.logger.exception("RMAP watermark generation failed")
+            return jsonify({"error": "watermark processing failed"}), 500
+
+        destination_dir = file_path.parent / "watermarks"
+
+        try:
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            destination_path = (
+                destination_dir / f"rmap_{expected_link}.pdf"
+            ).resolve()
+            destination_path.relative_to(storage_root)
+        except (OSError, ValueError):
+            app.logger.exception("RMAP destination path creation failed")
+            return jsonify({"error": "version storage failed"}), 500
+
+        # Exclusive creation prevents an existing version from being overwritten.
+        try:
+            with destination_path.open("xb") as output_file:
+                output_file.write(watermarked_bytes)
+        except FileExistsError:
+            app.logger.error("RMAP destination file already exists")
+            return jsonify({"error": "version already exists"}), 409
+        except OSError:
+            app.logger.exception("Could not write RMAP watermarked PDF")
+            return jsonify({"error": "version storage failed"}), 500
+
+        # Record the generated version only after the PDF was written.
+        try:
+            with get_engine().begin() as conn:
+                conn.execute(
+                    text("""
+                        INSERT INTO Versions
+                            (
+                                documentid,
+                                link,
+                                intended_for,
+                                secret,
+                                method,
+                                position,
+                                path
+                            )
+                        VALUES
+                            (
+                                :documentid,
+                                :link,
+                                :intended_for,
+                                :secret,
+                                :method,
+                                :position,
+                                :path
+                            )
+                    """),
+                    {
+                        "documentid": document_id,
+                        "link": expected_link,
+                        "intended_for": identity,
+                        "secret": identity,
+                        "method": method,
+                        "position": position or "",
+                        "path": str(destination_path),
+                    },
+                )
+
+        except Exception:
+            # Avoid leaving an untracked PDF if the database insert fails.
+            try:
+                destination_path.unlink(missing_ok=True)
+            except OSError:
+                app.logger.exception(
+                    "Failed to remove orphaned RMAP version file"
+                )
+
+            app.logger.exception("RMAP version database insert failed")
+            return jsonify({"error": "database error"}), 503
+
+        return jsonify(resp2), 200
 
     # POST /api/create-user {email, login, password}
     @app.post("/api/create-user")
