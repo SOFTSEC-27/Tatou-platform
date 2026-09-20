@@ -2,6 +2,9 @@ import os
 import io
 import hashlib
 import datetime as dt
+import uuid
+import secrets
+import threading
 from pathlib import Path
 from functools import wraps
 
@@ -13,11 +16,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
-import pickle as _std_pickle
-try:
-    import dill as _pickle  # allows loading classes not importable by module path
-except Exception:  # dill is optional
-    _pickle = _std_pickle
+from rmap import RMAPError, RMAPServer
 
 
 import watermarking_utils as WMUtils
@@ -28,8 +27,12 @@ def create_app():
     app = Flask(__name__)
 
     # --- Config ---
-    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-me")
+    secret_key = os.environ.get("SECRET_KEY")
+    if not secret_key:
+       raise RuntimeError("SECRET_KEY environment variable must be set")
+    app.config["SECRET_KEY"] = secret_key
     app.config["STORAGE_DIR"] = Path(os.environ.get("STORAGE_DIR", "./storage")).resolve()
+    app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
     app.config["TOKEN_TTL_SECONDS"] = int(os.environ.get("TOKEN_TTL_SECONDS", "86400"))
 
     app.config["DB_USER"] = os.environ.get("DB_USER", "tatou")
@@ -37,6 +40,35 @@ def create_app():
     app.config["DB_HOST"] = os.environ.get("DB_HOST", "db")
     app.config["DB_PORT"] = int(os.environ.get("DB_PORT", "3306"))
     app.config["DB_NAME"] = os.environ.get("DB_NAME", "tatou")
+
+    #--------RMAP configuration--------
+    app.config["RMAP_SERVER_PUBLIC_KEY_PATH"] = os.environ.get(
+        "RMAP_SERVER_PUBLIC_KEY_PATH"
+    )
+    app.config["RMAP_SERVER_PRIVATE_KEY_PATH"] = os.environ.get(
+        "RMAP_SERVER_PRIVATE_KEY_PATH"
+    )
+    app.config["RMAP_PRIVATE_KEY_PASSPHRASE"] = os.environ.get(
+        "RMAP_PRIVATE_KEY_PASSPHRASE"
+    )
+    app.config["RMAP_IDENTITIES_DIR"] = os.environ.get("RMAP_IDENTITIES_DIR")
+    app.config["RMAP_DOCUMENT_ID"] = os.environ.get("RMAP_DOCUMENT_ID")
+    app.config["RMAP_LINK_PREFIX"] = os.environ.get(
+        "RMAP_LINK_PREFIX",
+        "/api/get-version/",
+    )
+    app.config["RMAP_WATERMARK_METHOD"] = os.environ.get(
+        "RMAP_WATERMARK_METHOD",
+        "layered-identity-v1",
+    )
+    app.config["RMAP_WATERMARK_POSITION"] = os.environ.get(
+        "RMAP_WATERMARK_POSITION",
+        "center",
+    )
+    app.config["WATERMARK_HMAC_KEY"] = os.environ.get("WATERMARK_HMAC_KEY")
+
+    # RMAP v1.0.2 keeps handshake state in memory.
+    app.extensions["rmap_lock"] = threading.RLock()
 
     app.config["STORAGE_DIR"].mkdir(parents=True, exist_ok=True)
 
@@ -85,6 +117,70 @@ def create_app():
                 h.update(chunk)
         return h.hexdigest()
 
+    def get_rmap_server() -> RMAPServer:
+        """Create and cache the configured RMAP server on first use."""
+        lock = app.extensions["rmap_lock"]
+
+        with lock:
+            cached_server = app.extensions.get("rmap_server")
+            if cached_server is not None:
+                return cached_server
+
+            required_config = {
+                "RMAP_SERVER_PUBLIC_KEY_PATH": app.config.get(
+                    "RMAP_SERVER_PUBLIC_KEY_PATH"
+                ),
+                "RMAP_SERVER_PRIVATE_KEY_PATH": app.config.get(
+                    "RMAP_SERVER_PRIVATE_KEY_PATH"
+                ),
+                "RMAP_IDENTITIES_DIR": app.config.get("RMAP_IDENTITIES_DIR"),
+                "RMAP_DOCUMENT_ID": app.config.get("RMAP_DOCUMENT_ID"),
+                "WATERMARK_HMAC_KEY": app.config.get("WATERMARK_HMAC_KEY"),
+            }
+            missing = [
+                name
+                for name, value in required_config.items()
+                if not value
+            ]
+            if missing:
+                raise RuntimeError(
+                    "RMAP is not configured; missing: "
+                    + ", ".join(sorted(missing))
+                )
+
+            public_key_path = Path(
+                app.config["RMAP_SERVER_PUBLIC_KEY_PATH"]
+            ).resolve()
+            private_key_path = Path(
+                app.config["RMAP_SERVER_PRIVATE_KEY_PATH"]
+            ).resolve()
+            identities_dir = Path(
+                app.config["RMAP_IDENTITIES_DIR"]
+            ).resolve()
+
+            if not public_key_path.is_file():
+                raise RuntimeError("RMAP server public key is unavailable")
+            if not private_key_path.is_file():
+                raise RuntimeError("RMAP server private key is unavailable")
+            if not identities_dir.is_dir():
+                raise RuntimeError("RMAP identities directory is unavailable")
+
+            rmap_server = RMAPServer(
+                server_public_key_path=public_key_path,
+                server_private_key_path=private_key_path,
+                passphrase=(
+                    app.config.get("RMAP_PRIVATE_KEY_PASSPHRASE") or None
+                ),
+                linkPrefix=app.config["RMAP_LINK_PREFIX"],
+            )
+            rmap_server.loadIdentities(identities_dir)
+
+            if not rmap_server.identities:
+                raise RuntimeError("RMAP identities directory contains no keys")
+
+            app.extensions["rmap_server"] = rmap_server
+            return rmap_server
+
     # --- Routes ---
     
     @app.route("/<path:filename>")
@@ -104,6 +200,287 @@ def create_app():
         except Exception:
             db_ok = False
         return jsonify({"message": "The server is up and running.", "db_connected": db_ok}), 200
+
+    # POST /api/rmap-initiate
+    # Accept raw RMAP msg1 and return raw encrypted resp1.
+    @app.post("/api/rmap-initiate")
+    def rmap_initiate():
+        if not request.is_json:
+            return jsonify({"error": "JSON request body required"}), 400
+
+        msg1 = request.get_json(silent=True)
+        if not isinstance(msg1, dict):
+            return jsonify({"error": "RMAP message must be a JSON object"}), 400
+
+        try:
+            rmap_server = get_rmap_server()
+
+            # RMAP keeps handshake state in memory, so access is serialized.
+            with app.extensions["rmap_lock"]:
+                _identity, resp1 = rmap_server.receiveMsg1(msg1)
+
+            # Do not return identity separately; resp1 is encrypted for the
+            # authenticated client's public key.
+            return jsonify(resp1), 200
+
+        except RuntimeError as exc:
+            # Missing/unavailable key configuration is a server-side problem.
+            app.logger.warning("RMAP service unavailable: %s", exc)
+            return jsonify({"error": "RMAP service unavailable"}), 503
+
+        except RMAPError as exc:
+            # Use one generic response so callers cannot enumerate identities.
+            app.logger.warning(
+                "RMAP initiate rejected: %s",
+                type(exc).__name__,
+            )
+            return jsonify({"error": "RMAP authentication failed"}), 400
+
+        except Exception:
+            app.logger.exception("Unexpected RMAP initiate failure")
+            return jsonify({"error": "RMAP request processing failed"}), 500
+
+    # POST /api/rmap-get-link
+    # Accept raw RMAP msg2, generate an identity-watermarked PDF,
+    # store the version, and return the encrypted download link.
+    @app.post("/api/rmap-get-link")
+    def rmap_get_link():
+        if not request.is_json:
+            return jsonify({"error": "JSON request body required"}), 400
+
+        msg2 = request.get_json(silent=True)
+        if not isinstance(msg2, dict):
+            return jsonify({"error": "RMAP message must be a JSON object"}), 400
+
+        # Complete RMAP authentication and obtain the authenticated identity.
+        try:
+            rmap_server = get_rmap_server()
+
+            with app.extensions["rmap_lock"]:
+                identity, expected_link, resp2 = rmap_server.receiveMsg2(msg2)
+
+        except RuntimeError as exc:
+            app.logger.warning(
+                "RMAP service unavailable during msg2: %s",
+                type(exc).__name__,
+            )
+            return jsonify({"error": "RMAP service unavailable"}), 503
+
+        except RMAPError as exc:
+            app.logger.warning(
+                "RMAP get-link rejected: %s",
+                type(exc).__name__,
+            )
+            return jsonify({"error": "RMAP authentication failed"}), 400
+
+        except Exception:
+            app.logger.exception("Unexpected RMAP msg2 failure")
+            return jsonify({"error": "RMAP request processing failed"}), 500
+
+        # Defensive validation. RMAP v1.0.2 normally returns a 32-character
+        # hexadecimal link.
+        if not isinstance(identity, str) or not identity:
+            app.logger.error("RMAP returned an invalid identity")
+            return jsonify({"error": "RMAP request processing failed"}), 500
+
+        if (
+            not isinstance(expected_link, str)
+            or len(expected_link) != 32
+            or not all(
+                char in "0123456789abcdefABCDEF"
+                for char in expected_link
+            )
+        ):
+            app.logger.error("RMAP returned an invalid expected link")
+            return jsonify({"error": "RMAP request processing failed"}), 500
+
+        try:
+            document_id = int(app.config["RMAP_DOCUMENT_ID"])
+        except (TypeError, ValueError):
+            app.logger.error("RMAP_DOCUMENT_ID is invalid")
+            return jsonify({"error": "RMAP service unavailable"}), 503
+
+        # Look up the configured source PDF. Also detect an already-created
+        # version so a repeated valid request does not create another file.
+        try:
+            with get_engine().connect() as conn:
+                document_row = conn.execute(
+                    text("""
+                        SELECT id, path
+                        FROM Documents
+                        WHERE id = :id
+                        LIMIT 1
+                    """),
+                    {"id": document_id},
+                ).first()
+
+                existing_version = conn.execute(
+                    text("""
+                        SELECT id, path
+                        FROM Versions
+                        WHERE documentid = :documentid
+                          AND link = :link
+                          AND intended_for = :identity
+                        LIMIT 1
+                    """),
+                    {
+                        "documentid": document_id,
+                        "link": expected_link,
+                        "identity": identity,
+                    },
+                ).first()
+
+        except Exception:
+            app.logger.exception("RMAP document lookup failed")
+            return jsonify({"error": "database error"}), 503
+
+        if not document_row:
+            app.logger.error("Configured RMAP document was not found")
+            return jsonify({"error": "RMAP document unavailable"}), 503
+
+        storage_root = Path(app.config["STORAGE_DIR"]).resolve()
+
+        if existing_version:
+            try:
+                existing_path = _safe_resolve_under_storage(
+                    str(existing_version.path),
+                    storage_root,
+                )
+            except RuntimeError:
+                app.logger.error("Existing RMAP version path is invalid")
+                return jsonify({"error": "RMAP version unavailable"}), 500
+
+            if existing_path.exists():
+                return jsonify(resp2), 200
+
+            app.logger.error("Existing RMAP version file is missing")
+            return jsonify({"error": "RMAP version unavailable"}), 500
+
+        # Resolve the configured source document safely inside STORAGE_DIR.
+        try:
+            file_path = _safe_resolve_under_storage(
+                str(document_row.path),
+                storage_root,
+            )
+        except RuntimeError:
+            app.logger.error("Configured RMAP document path is invalid")
+            return jsonify({"error": "RMAP document unavailable"}), 500
+
+        if not file_path.exists() or not file_path.is_file():
+            app.logger.error("Configured RMAP document file is missing")
+            return jsonify({"error": "RMAP document unavailable"}), 503
+
+        method = app.config["RMAP_WATERMARK_METHOD"]
+        position = app.config["RMAP_WATERMARK_POSITION"]
+        watermark_key = app.config["WATERMARK_HMAC_KEY"]
+
+        # Confirm that the selected watermark implementation supports this PDF.
+        try:
+            applicable = WMUtils.is_watermarking_applicable(
+                method=method,
+                pdf=str(file_path),
+                position=position,
+            )
+        except Exception:
+            app.logger.exception("RMAP watermark applicability check failed")
+            return jsonify({"error": "watermark processing failed"}), 500
+
+        if applicable is False:
+            return jsonify({"error": "watermarking method not applicable"}), 400
+
+        # The authenticated RMAP identity becomes the protected watermark value.
+        try:
+            watermarked_bytes = WMUtils.apply_watermark(
+                pdf=str(file_path),
+                secret=identity,
+                key=watermark_key,
+                method=method,
+                position=position,
+            )
+
+            if (
+                not isinstance(watermarked_bytes, (bytes, bytearray))
+                or len(watermarked_bytes) == 0
+            ):
+                raise RuntimeError("watermarking produced no output")
+
+        except Exception:
+            app.logger.exception("RMAP watermark generation failed")
+            return jsonify({"error": "watermark processing failed"}), 500
+
+        destination_dir = file_path.parent / "watermarks"
+
+        try:
+            destination_dir.mkdir(parents=True, exist_ok=True)
+            destination_path = (
+                destination_dir / f"rmap_{expected_link}.pdf"
+            ).resolve()
+            destination_path.relative_to(storage_root)
+        except (OSError, ValueError):
+            app.logger.exception("RMAP destination path creation failed")
+            return jsonify({"error": "version storage failed"}), 500
+
+        # Exclusive creation prevents an existing version from being overwritten.
+        try:
+            with destination_path.open("xb") as output_file:
+                output_file.write(watermarked_bytes)
+        except FileExistsError:
+            app.logger.error("RMAP destination file already exists")
+            return jsonify({"error": "version already exists"}), 409
+        except OSError:
+            app.logger.exception("Could not write RMAP watermarked PDF")
+            return jsonify({"error": "version storage failed"}), 500
+
+        # Record the generated version only after the PDF was written.
+        try:
+            with get_engine().begin() as conn:
+                conn.execute(
+                    text("""
+                        INSERT INTO Versions
+                            (
+                                documentid,
+                                link,
+                                intended_for,
+                                secret,
+                                method,
+                                position,
+                                path
+                            )
+                        VALUES
+                            (
+                                :documentid,
+                                :link,
+                                :intended_for,
+                                :secret,
+                                :method,
+                                :position,
+                                :path
+                            )
+                    """),
+                    {
+                        "documentid": document_id,
+                        "link": expected_link,
+                        "intended_for": identity,
+                        "secret": identity,
+                        "method": method,
+                        "position": position or "",
+                        "path": str(destination_path),
+                    },
+                )
+
+        except Exception:
+            # Avoid leaving an untracked PDF if the database insert fails.
+            try:
+                destination_path.unlink(missing_ok=True)
+            except OSError:
+                app.logger.exception(
+                    "Failed to remove orphaned RMAP version file"
+                )
+
+            app.logger.exception("RMAP version database insert failed")
+            return jsonify({"error": "database error"}), 503
+
+        return jsonify(resp2), 200
 
     # POST /api/create-user {email, login, password}
     @app.post("/api/create-user")
@@ -166,18 +543,43 @@ def create_app():
         if "file" not in request.files:
             return jsonify({"error": "file is required (multipart/form-data)"}), 400
         file = request.files["file"]
-        if not file or file.filename == "":
-            return jsonify({"error": "empty filename"}), 400
+        original_name = file.filename or ""
+        safe_name = secure_filename(original_name)
 
-        fname = file.filename
+        if not safe_name:
+            return jsonify({"error": "invalid filename"}), 400
 
-        user_dir = app.config["STORAGE_DIR"] / "files" / g.user["login"]
+        # Only PDF files are supported by this application.
+        if Path(safe_name).suffix.lower() != ".pdf":
+            return jsonify({"error": "only PDF files are allowed"}), 415
+
+        if file.mimetype != "application/pdf":
+            return jsonify({"error": "invalid PDF content type"}), 415
+
+    # Do not trust the extension or Content-Type alone.
+        header = file.stream.read(5)
+        file.stream.seek(0)
+        if header != b"%PDF-":
+            return jsonify({"error": "invalid PDF file"}), 415
+
+        final_name = (request.form.get("name") or safe_name).strip()
+        if not final_name or len(final_name) > 255:
+            return jsonify({"error": "invalid document name"}), 400
+
+        # Use the numeric user ID, not the user-controlled login, as a directory name.
+        user_dir = app.config["STORAGE_DIR"] / "files" / str(int(g.user["id"]))
         user_dir.mkdir(parents=True, exist_ok=True)
 
-        ts = dt.datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
-        final_name = request.form.get("name") or fname
-        stored_name = f"{ts}__{fname}"
-        stored_path = user_dir / stored_name
+        # The physical filename is generated entirely by the server.
+        stored_name = f"{uuid.uuid4().hex}.pdf"
+        stored_path = (user_dir / stored_name).resolve()
+
+    # Defence in depth: verify the final destination remains inside STORAGE_DIR.
+        try:
+            stored_path.relative_to(app.config["STORAGE_DIR"])
+        except ValueError:
+            return jsonify({"error": "invalid storage path"}), 500
+
         file.save(stored_path)
 
         sha_hex = _sha256_file(stored_path)
@@ -443,7 +845,8 @@ def create_app():
 
     # DELETE /api/delete-document  (and variants)
     @app.route("/api/delete-document", methods=["DELETE", "POST"])  # POST supported for convenience
-    @app.route("/api/delete-document/<document_id>", methods=["DELETE"])
+    @app.route("/api/delete-document/<int:document_id>", methods=["DELETE"])
+    @require_auth
     def delete_document(document_id: int | None = None):
         # accept id from path, query (?id= / ?documentid=), or JSON body on POST
         if not document_id:
@@ -453,15 +856,17 @@ def create_app():
                 or (request.is_json and (request.get_json(silent=True) or {}).get("id"))
             )
         try:
-            doc_id = document_id
+            doc_id = int(document_id)
         except (TypeError, ValueError):
             return jsonify({"error": "document id required"}), 400
 
         # Fetch the document (enforce ownership)
         try:
             with get_engine().connect() as conn:
-                query = "SELECT * FROM Documents WHERE id = " + doc_id
-                row = conn.execute(text(query)).first()
+                row = conn.execute(
+                    text(""" SELECT * FROM Documents WHERE id = :id AND ownerid = :uid """),
+                    {"id": doc_id, "uid": int(g.user["id"])}).first()
+                
         except Exception as e:
             return jsonify({"error": f"database error: {str(e)}"}), 503
 
@@ -496,7 +901,8 @@ def create_app():
                 # If your schema does NOT have ON DELETE CASCADE on Version.documentid,
                 # uncomment the next line first:
                 # conn.execute(text("DELETE FROM Version WHERE documentid = :id"), {"id": doc_id})
-                conn.execute(text("DELETE FROM Documents WHERE id = :id"), {"id": doc_id})
+                conn.execute(text("DELETE FROM Documents WHERE id = :id AND ownerid = :uid"), {"id": doc_id, "uid": int(g.user["id"]) })
+
         except Exception as e:
             return jsonify({"error": f"database error during delete: {str(e)}"}), 503
 
@@ -549,10 +955,10 @@ def create_app():
                     text("""
                         SELECT id, name, path
                         FROM Documents
-                        WHERE id = :id
+                        WHERE id = :id AND ownerid = :uid
                         LIMIT 1
                     """),
-                    {"id": doc_id},
+                    {"id": doc_id, "uid": int(g.user["id"])},
                 ).first()
         except Exception as e:
             return jsonify({"error": f"database error: {str(e)}"}), 503
@@ -600,23 +1006,38 @@ def create_app():
             return jsonify({"error": f"watermarking failed: {e}"}), 500
 
         # build destination file name: "<original_name>__<intended_to>.pdf"
-        base_name = Path(row.name or file_path.name).stem
-        intended_slug = secure_filename(intended_for)
+        # Create safe, bounded filename components.
+        base_slug = secure_filename(
+            Path(row.name or file_path.name).stem
+        )[:80] or "document"
+
+        intended_slug = secure_filename(intended_for)[:80] or "recipient"
+
+        # A public download link must be unpredictable.
+        # token_urlsafe(32) provides 256 bits of randomness.
+        link_token = secrets.token_urlsafe(32)
+
         dest_dir = file_path.parent / "watermarks"
         dest_dir.mkdir(parents=True, exist_ok=True)
 
-        candidate = f"{base_name}__{intended_slug}.pdf"
-        dest_path = dest_dir / candidate
+        # Include the random token so separate versions never overwrite each other.
+        candidate = f"{base_slug}__{intended_slug}__{link_token}.pdf"
+        dest_path = (dest_dir / candidate).resolve()
 
-        # write bytes
         try:
-            with dest_path.open("wb") as f:
-                f.write(wm_bytes)
-        except Exception as e:
-            return jsonify({"error": f"failed to write watermarked file: {e}"}), 500
+            dest_path.relative_to(Path(app.config["STORAGE_DIR"]).resolve())
+        except ValueError:
+            return jsonify({"error": "invalid version storage path"}), 500
 
-        # link token = sha1(watermarked_file_name)
-        link_token = hashlib.sha1(candidate.encode("utf-8")).hexdigest()
+        #  Write the generated watermarked PDF without overwriting an existing file.
+        try:
+            with dest_path.open("xb") as f:
+                f.write(wm_bytes)
+        except FileExistsError:
+            return jsonify({"error": "version file already exists"}), 409
+        except OSError:
+            app.logger.exception("Failed to write watermarked PDF")
+            return jsonify({"error": "failed to write watermarked file"}), 500
 
         try:
             with get_engine().begin() as conn:
@@ -659,69 +1080,9 @@ def create_app():
     @app.post("/api/load-plugin")
     @require_auth
     def load_plugin():
-        """
-        Load a serialized Python class implementing WatermarkingMethod from
-        STORAGE_DIR/files/plugins/<filename>.{pkl|dill} and register it in wm_mod.METHODS.
-        Body: { "filename": "MyMethod.pkl", "overwrite": false }
-        """
-        payload = request.get_json(silent=True) or {}
-        filename = (payload.get("filename") or "").strip()
-        overwrite = bool(payload.get("overwrite", False))
 
-        if not filename:
-            return jsonify({"error": "filename is required"}), 400
-
-        # Locate the plugin in /storage/files/plugins (relative to STORAGE_DIR)
-        storage_root = Path(app.config["STORAGE_DIR"])
-        plugins_dir = storage_root / "files" / "plugins"
-        try:
-            plugins_dir.mkdir(parents=True, exist_ok=True)
-            plugin_path = plugins_dir / filename
-        except Exception as e:
-            return jsonify({"error": f"plugin path error: {e}"}), 500
-
-        if not plugin_path.exists():
-            return jsonify({"error": f"plugin file not found: {safe}"}), 404
-
-        # Unpickle the object (dill if available; else std pickle)
-        try:
-            with plugin_path.open("rb") as f:
-                obj = _pickle.load(f)
-        except Exception as e:
-            return jsonify({"error": f"failed to deserialize plugin: {e}"}), 400
-
-        # Accept: class object, or instance (we'll promote instance to its class)
-        if isinstance(obj, type):
-            cls = obj
-        else:
-            cls = obj.__class__
-
-        # Determine method name for registry
-        method_name = getattr(cls, "name", getattr(cls, "__name__", None))
-        if not method_name or not isinstance(method_name, str):
-            return jsonify({"error": "plugin class must define a readable name (class.__name__ or .name)"}), 400
-
-        # Validate interface: either subclass of WatermarkingMethod or duck-typing
-        has_api = all(hasattr(cls, attr) for attr in ("add_watermark", "read_secret"))
-        if WatermarkingMethod is not None:
-            is_ok = issubclass(cls, WatermarkingMethod) and has_api
-        else:
-            is_ok = has_api
-        if not is_ok:
-            return jsonify({"error": "plugin does not implement WatermarkingMethod API (add_watermark/read_secret)"}), 400
-            
-        # Register the class (not an instance) so you can instantiate as needed later
-        WMUtils.METHODS[method_name] = cls()
-        
-        return jsonify({
-            "loaded": True,
-            "filename": filename,
-            "registered_as": method_name,
-            "class_qualname": f"{getattr(cls, '__module__', '?')}.{getattr(cls, '__qualname__', cls.__name__)}",
-            "methods_count": len(WMUtils.METHODS)
-        }), 201
-        
-    
+        return jsonify({"error": "dynamic plugin loading is disabled for security reasons"
+	}), 403    
     
     # GET /api/get-watermarking-methods -> {"methods":[{"name":..., "description":...}, ...], "count":N}
     @app.get("/api/get-watermarking-methods")
@@ -771,9 +1132,9 @@ def create_app():
                     text("""
                         SELECT id, name, path
                         FROM Documents
-                        WHERE id = :id
+                        WHERE id = :id AND ownerid = :uid
                     """),
-                    {"id": doc_id},
+                    {"id": doc_id, "uid": int(g.user["id"])},
                 ).first()
         except Exception as e:
             return jsonify({"error": f"database error: {str(e)}"}), 503

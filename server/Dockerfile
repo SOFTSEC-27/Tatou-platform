@@ -29,7 +29,7 @@ RUN groupadd --system appuser \
     && chown -R appuser:appuser /app/src /app/storage \
     && chown appuser:appuser /app/flag /app/entrypoint.sh \
     && chmod 755 /app/entrypoint.sh \
-    && chmod 600 /app/flag
+    && chmod 400 /app/flag
 
 USER appuser
 
