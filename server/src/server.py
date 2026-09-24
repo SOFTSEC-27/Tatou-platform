@@ -666,23 +666,23 @@ def create_app():
             with get_engine().connect() as conn:
                 rows = conn.execute(
                     text("""
-                        SELECT v.id, v.documentid, v.link, v.intended_for, v.secret, v.method
-                        FROM Users u
-                        JOIN Documents d ON d.ownerid = u.id
+                        SELECT v.id, v.documentid, v.link, v.intended_for, v.method
+                        FROM Documents d
                         JOIN Versions v ON d.id = v.documentid
-                        WHERE u.login = :glogin AND d.id = :did
+                        WHERE d.ownerid = :uid AND d.id = :did
+                        ORDER BY v.id DESC
                     """),
-                    {"glogin": str(g.user["login"]), "did": document_id},
+                    {"uid": int(g.user["id"]), "did": int(document_id)},
                 ).all()
-        except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+        except Exception:
+            app.logger.exception("Failed to list document versions")
+            return jsonify({"error": f"database error"}), 503
 
         versions = [{
             "id": int(r.id),
             "documentid": int(r.documentid),
             "link": r.link,
             "intended_for": r.intended_for,
-            "secret": r.secret,
             "method": r.method,
         } for r in rows]
         return jsonify({"versions": versions}), 200
@@ -697,15 +697,16 @@ def create_app():
                 rows = conn.execute(
                     text("""
                         SELECT v.id, v.documentid, v.link, v.intended_for, v.method
-                        FROM Users u
-                        JOIN Documents d ON d.ownerid = u.id
+                        FROM Documents d
                         JOIN Versions v ON d.id = v.documentid
-                        WHERE u.login = :glogin
+                        WHERE d.ownerid = :uid
+                        ORDER BY v.id DESC
                     """),
-                    {"glogin": str(g.user["login"])},
+                    {"uid": int(g.user["id"])},
                 ).all()
         except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+            app.logger.exception("Failed to list all versions")
+            return jsonify({"error": f"database error"}), 503
 
         versions = [{
             "id": int(r.id),
@@ -849,16 +850,30 @@ def create_app():
     @require_auth
     def delete_document(document_id: int | None = None):
         # accept id from path, query (?id= / ?documentid=), or JSON body on POST
-        if not document_id:
-            document_id = (
-                request.args.get("id")
-                or request.args.get("documentid")
-                or (request.is_json and (request.get_json(silent=True) or {}).get("id"))
+        if document_id is None:
+            payload = (
+                request.get_json(silent=True)
+                if request.is_json
+                else {}
+            ) or {}
+
+            candidates = (
+                request.args.get("id"),
+                request.args.get("documentid"),
+                payload.get("id"),
+                payload.get("documentid"),
             )
+
+            for candidate in candidates:
+                if candidate is not None:
+                    document_id = candidate
+                    break
         try:
             doc_id = int(document_id)
         except (TypeError, ValueError):
             return jsonify({"error": "document id required"}), 400
+        if doc_id <= 0:
+            return jsonify({"error":"document id must be positive"}), 400
 
         # Fetch the document (enforce ownership)
         try:
@@ -866,52 +881,128 @@ def create_app():
                 row = conn.execute(
                     text(""" SELECT * FROM Documents WHERE id = :id AND ownerid = :uid """),
                     {"id": doc_id, "uid": int(g.user["id"])}).first()
+
+                if row:
+                    version_rows = conn.execute(
+                        text("""
+                            SELECT id, path
+                            FROM Versions
+                            WHERE documentid = :document_id
+                        """),
+                        {"document_id": doc_id},
+                    ).all()
+                else:
+                    version_rows = []
                 
-        except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+        except Exception:
+            app.logger.exception("Failed to prepare document delection")
+            return jsonify({"error": f"database error:"}), 503
 
         if not row:
             # Don’t reveal others’ docs—just say not found
             return jsonify({"error": "document not found"}), 404
 
         # Resolve and delete file (best effort)
-        storage_root = Path(app.config["STORAGE_DIR"])
-        file_deleted = False
-        file_missing = False
-        delete_error = None
+        storage_root = Path(app.config["STORAGE_DIR"]).resolve()
+        stored_paths = [str(row.path)]
+        stored_paths.extend(str(version.path) for version in version_rows)
+
+        resolved_paths: dict[str, Path] = {}
+
         try:
-            fp = _safe_resolve_under_storage(row.path, storage_root)
-            if fp.exists():
-                try:
-                    fp.unlink()
-                    file_deleted = True
-                except Exception as e:
-                    delete_error = f"failed to delete file: {e}"
-                    app.logger.warning("Failed to delete file %s for doc id=%s: %s", fp, row.id, e)
-            else:
-                file_missing = True
-        except RuntimeError as e:
+            for stored_path in stored_paths:
+                resolved = _safe_resolve_under_storage(stored_path, storage_root, )
+                resolved_paths[str(resolved)] = resolved
+
+        except RuntimeError:
             # Path escapes storage root; refuse to touch the file
-            delete_error = str(e)
-            app.logger.error("Path safety check failed for doc id=%s: %s", row.id, e)
+            app.logger.error( "Deletion refused because a stored path escapes storage" )
+            return jsonify({"error": "stored path invalid"}), 500
+
+        existing_paths: list[Path] = []
+        missing_count = 0
+
+        for file_path in resolved_paths.values():
+            if not file_path.exists():
+                missing_count += 1
+                continue
+            if not file_path.is_file():
+                app.logger.error("Deletion refused because stored path is not a file")
+                return jsonify({"error": "stored path invalid"}), 500
+            existing_paths.append(file_path)
+
+        # Move files aside first. A rename on the same filesystem is atomic.
+        moved_files: list[tuple[Path, Path]] = []
+
+        def restore_moved_files() -> None:
+            for original_path, staged_path in reversed(moved_files):
+                try:
+                    if staged_path.exists() and not original_path.exists():
+                        staged_path.replace(original_path)
+                except OSError:
+                    app.logger.exception(
+                        "Failed to restore staged file during rollback"
+                )
+
+        try:
+            for original_path in existing_paths:
+                staged_path = original_path.with_name(
+                    f".tatou-delete-{uuid.uuid4().hex}-"
+                    f"{original_path.name}"
+                )
+
+                original_path.replace(staged_path)
+
+                moved_files.append(
+                    (original_path, staged_path)
+                )
+        except OSError:
+            app.logger.exception("Failed to stage files for deletion")
+            restore_moved_files()
+            return jsonify({"error": "file deletion failed"}), 500
 
         # Delete DB row (will cascade to Version if FK has ON DELETE CASCADE)
         try:
             with get_engine().begin() as conn:
-                # If your schema does NOT have ON DELETE CASCADE on Version.documentid,
-                # uncomment the next line first:
-                # conn.execute(text("DELETE FROM Version WHERE documentid = :id"), {"id": doc_id})
-                conn.execute(text("DELETE FROM Documents WHERE id = :id AND ownerid = :uid"), {"id": doc_id, "uid": int(g.user["id"]) })
+                result = conn.execute(text("DELETE FROM Documents WHERE id = :id AND ownerid = :uid"), {"id": doc_id, "uid": int(g.user["id"]) })
+                if result.rowcount != 1:
+                    raise RuntimeError("Document disappeared during deletion")
 
-        except Exception as e:
-            return jsonify({"error": f"database error during delete: {str(e)}"}), 503
+        except Exception:
+            app.logger.exception("Document disappeared during deletion")
+            restore_moved_files()
+            return jsonify({"error": f"database error during delete:"}), 503
+ 
+    # Database deletion succeeded. Permanently remove staged files.
+        deleted_count = 0
+        cleanup_pending = 0
+
+        for _original_path, staged_path in moved_files:
+            try:
+                staged_path.unlink()
+                deleted_count += 1
+            except OSError:
+                cleanup_pending += 1
+                app.logger.exception("Failed to remove staged deleted file")
+
+        watermark_directories = {
+            original_path.parent
+            for original_path, _staged_path in moved_files
+            if original_path.parent.name == "watermarks"
+        }
+
+        for directory in watermark_directories:
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
 
         return jsonify({
             "deleted": True,
             "id": doc_id,
-            "file_deleted": file_deleted,
-            "file_missing": file_missing,
-            "note": delete_error,   # null/omitted if everything was fine
+            "file_deleted": deleted_count,
+            "file_missing": missing_count,
+            "cleanup_pending": cleanup_pending,
         }), 200
         
         
@@ -1053,7 +1144,7 @@ def create_app():
                         "secret": secret,
                         "method": method,
                         "position": position or "",
-                        "path": dest_path
+                        "path": str(dest_path)
                     },
                 )
                 vid = int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
@@ -1093,86 +1184,126 @@ def create_app():
             methods.append({"name": m, "description": WMUtils.get_method(m).get_usage()})
             
         return jsonify({"methods": methods, "count": len(methods)}), 200
-        
+    
     # POST /api/read-watermark
     @app.post("/api/read-watermark")
     @app.post("/api/read-watermark/<int:document_id>")
     @require_auth
     def read_watermark(document_id: int | None = None):
-        # accept id from path, query (?id= / ?documentid=), or JSON body on POST
-        if not document_id:
-            document_id = (
-                request.args.get("id")
-                or request.args.get("documentid")
-                or (request.is_json and (request.get_json(silent=True) or {}).get("id"))
+        payload = request.get_json(silent=True)
+
+        if not isinstance(payload, dict):
+            return jsonify({"error": "JSON request body required"}), 400
+
+        if document_id is None:
+            candidates = (
+                request.args.get("id"),
+                request.args.get("documentid"),
+                payload.get("document_id"),
+                payload.get("documentid"),
             )
-        try:
-            doc_id = document_id
-        except (TypeError, ValueError):
-            return jsonify({"error": "document id required"}), 400
-            
-        payload = request.get_json(silent=True) or {}
-        # allow a couple of aliases for convenience
-        method = payload.get("method")
-        position = payload.get("position") or None
+
+            for candidate in candidates:
+                if candidate is not None:
+                    document_id = candidate
+                    break
+        version_id = payload.get("version_id")
+
+        if version_id is None:
+            version_id = payload.get("versionid")
+
         key = payload.get("key")
 
-        # validate input
         try:
-            doc_id = int(doc_id)
+            doc_id = int(document_id)
+            version_id = int(version_id)
         except (TypeError, ValueError):
-            return jsonify({"error": "document_id (int) is required"}), 400
-        if not method or not isinstance(key, str):
-            return jsonify({"error": "method, and key are required"}), 400
+            return jsonify({
+                "error": "document_id and version_id must be integers"
+            }), 400
 
-        # lookup the document; FIXME enforce ownership
+        if doc_id <= 0 or version_id <= 0:
+            return jsonify({
+                "error": "document_id and version_id must be positive"
+            }), 400
+
+        if not isinstance(key, str) or not key:
+            return jsonify({"error": "key is required"}), 400
+
+        # Look up the exact watermarked version and enforce document ownership.
         try:
             with get_engine().connect() as conn:
                 row = conn.execute(
                     text("""
-                        SELECT id, name, path
-                        FROM Documents
-                        WHERE id = :id AND ownerid = :uid
+                        SELECT
+                            v.id AS version_id,
+                            v.documentid,
+                            v.path,
+                            v.method,
+                            v.position
+                        FROM Versions v
+                        JOIN Documents d
+                        ON d.id = v.documentid
+                        WHERE v.id = :version_id
+                        AND v.documentid = :document_id
+                        AND d.ownerid = :user_id
+                        LIMIT 1
                     """),
-                    {"id": doc_id, "uid": int(g.user["id"])},
+                    {
+                        "version_id": version_id,
+                        "document_id": doc_id,
+                        "user_id": int(g.user["id"]),
+                    },
                 ).first()
-        except Exception as e:
-            return jsonify({"error": f"database error: {str(e)}"}), 503
+        except Exception:
+            app.logger.exception("Failed to look up watermark version")
+            return jsonify({"error": "database error"}), 503
 
+        # Use the same response for a missing version and another user's version.
         if not row:
-            return jsonify({"error": "document not found"}), 404
+            return jsonify({"error": "watermark version not found"}), 404
 
-        # resolve path safely under STORAGE_DIR
         storage_root = Path(app.config["STORAGE_DIR"]).resolve()
-        file_path = Path(row.path)
-        if not file_path.is_absolute():
-            file_path = storage_root / file_path
-        file_path = file_path.resolve()
+
         try:
-            file_path.relative_to(storage_root)
-        except ValueError:
-            return jsonify({"error": "document path invalid"}), 500
-        if not file_path.exists():
-            return jsonify({"error": "file missing on disk"}), 410
-        
-        secret = None
+            file_path = _safe_resolve_under_storage(
+                str(row.path),
+                storage_root,
+            )
+        except RuntimeError:
+            app.logger.error(
+                "Stored watermark version path is outside storage"
+            )
+            return jsonify({"error": "watermark path invalid"}), 500
+
+        if not file_path.exists() or not file_path.is_file():
+            return jsonify({"error": "watermark file missing"}), 410
+
         try:
             secret = WMUtils.read_watermark(
-                method=method,
+                method=row.method,
                 pdf=str(file_path),
-                key=key
+                key=key,
             )
-        except Exception as e:
-            return jsonify({"error": f"Error when attempting to read watermark: {e}"}), 400
-        return jsonify({
-            "documentid": doc_id,
-            "secret": secret,
-            "method": method,
-            "position": position
-        }), 201
+        except Exception:
+            app.logger.warning(
+                "Watermark verification failed for version id=%s",
+                version_id,
+                exc_info=True,
+            )
+            return jsonify({
+                "error": "watermark verification failed"
+            }), 400
 
-    return app
+        return jsonify({
+            "documentid": int(row.documentid),
+            "versionid": int(row.version_id),
+            "secret": secret,
+            "method": row.method,
+            "position": row.position or None,
+        }), 200
     
+    return app
 
 # WSGI entrypoint
 app = create_app()

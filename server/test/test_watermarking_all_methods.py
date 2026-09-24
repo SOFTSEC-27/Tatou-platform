@@ -19,8 +19,7 @@ except Exception:  # registry/module missing
 
 CASES: list[tuple[str, object]] = []
 for name, impl in (METHODS or {}).items():
-    if not name == "UnsafeBashBridgeAppendEOF":
-        CASES.append((str(name), impl))
+    CASES.append((str(name), impl))
 
 if not CASES:
     pytest.skip("No watermarking methods registered in watermarking_utils.METHODS", allow_module_level=True)
@@ -61,6 +60,8 @@ def _as_instance(impl: object) -> object:
         return impl()  # assumes zero-arg constructor
     return impl
 
+def test_unsafe_bash_bridge_is_not_registered():
+    assert "bash-bridge-eof" not in METHODS
 
 # --------- parameterization over all methods ----------
 @pytest.mark.parametrize("method_name,impl", CASES, ids=[n for n, _ in CASES])
@@ -71,6 +72,7 @@ class TestAllWatermarkingMethods:
         assert isinstance(ok, bool), f"{method_name}: is_watermark_applicable must return bool"
         if not ok:
             pytest.skip(f"{method_name}: not applicable to the sample PDF")
+
 
     def test_add_watermark_and_shape(self, method_name: str, impl: object, sample_pdf_path: Path, secret: str, key: str):
         wm_impl = _as_instance(impl)
