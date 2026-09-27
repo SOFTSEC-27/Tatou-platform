@@ -44,6 +44,7 @@ from watermarking_method import (
 from add_after_eof import AddAfterEOF
 from layered_pdf_watermark import LayeredPDFWatermark #Add a new watermark method
 from visible_text_watermark import VisibleTextWatermark #Add visible watermark method
+from GeometricWatermark import GeometricWatermark
 
 # --------------------
 # Method registry
@@ -53,6 +54,7 @@ METHODS: Dict[str, WatermarkingMethod] = {
     AddAfterEOF.name: AddAfterEOF(),
     LayeredPDFWatermark.name: LayeredPDFWatermark(),
     VisibleTextWatermark.name: VisibleTextWatermark(),
+    GeometricWatermark.name: GeometricWatermark(),
 }
 """Registry of available watermarking methods.
 
