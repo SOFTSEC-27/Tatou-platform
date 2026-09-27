@@ -20,6 +20,7 @@ dev = [
 
 [tool.pytest.ini_options]
 addopts = "-q"
+pythonpath = ["src"]
 testpaths = ["test/"]
 python_files = ["test_*.py"]
 
