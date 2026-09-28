@@ -29,7 +29,7 @@
           <button class="btn btn--primary" type="submit">Upload PDF</button>
         </form>
         <span id="status" class="muted"></span>
-      </div>
+      </div>readWmForm
     </section>
 
     <section class="card">
@@ -195,6 +195,7 @@
           const list = (data.versions||[]).map(v => `
             <li class="list-row">
               <div>
+                <div><strong>Version ID:</strong> ${escapeHtml(String(v.id))}</div>
                 <div><strong>Link:</strong> <a href="api/get-version/${escapeHtml(v.link)}">${escapeHtml(v.link)}</a></div>
                 <div class="muted small">Method: ${escapeHtml(v.method || '')} • Intended for: ${escapeHtml(v.intended_for || '')}</div>
               </div>
@@ -254,6 +255,7 @@
       const options = methods.map(m => `<option value="${escapeHtml(m.name)}">${escapeHtml(m.name)} — ${escapeHtml(m.description||'')}</option>`).join('');
       openModal('Read watermark for #' + documentId, `
         <form id="readWmForm" class="form-vertical">
+          <label>Version ID<input name="version_id" type="number" min="1" placeholder="Version ID" required></label>
           <label>Method<select name="method" required><option value="" disabled selected>Select a method</option>${options}</select></label>
           <label>Position<input name="position" placeholder="Position"></label>
           <label>Key<input name="key" placeholder="Reader key" required></label>

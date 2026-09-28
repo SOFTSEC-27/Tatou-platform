@@ -42,8 +42,9 @@ from watermarking_method import (
     load_pdf_bytes,
 )
 from add_after_eof import AddAfterEOF
-from unsafe_bash_bridge_append_eof import UnsafeBashBridgeAppendEOF
 from layered_pdf_watermark import LayeredPDFWatermark #Add a new watermark method
+from visible_text_watermark import VisibleTextWatermark #Add visible watermark method
+from GeometricWatermark import GeometricWatermark
 from watermarking_zw_HMAC_method import ZwHMACWatermark
 
 # --------------------
@@ -52,8 +53,9 @@ from watermarking_zw_HMAC_method import ZwHMACWatermark
 
 METHODS: Dict[str, WatermarkingMethod] = {
     AddAfterEOF.name: AddAfterEOF(),
-    UnsafeBashBridgeAppendEOF.name: UnsafeBashBridgeAppendEOF(),
     LayeredPDFWatermark.name: LayeredPDFWatermark(),
+    VisibleTextWatermark.name: VisibleTextWatermark(),
+    GeometricWatermark.name: GeometricWatermark(),
     ZwHMACWatermark.name: ZwHMACWatermark(),
 }
 """Registry of available watermarking methods.

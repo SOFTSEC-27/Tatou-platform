@@ -11,9 +11,9 @@ Design highlights
 -----------------
 - Modern Python (3.10+), with type hints and docstrings.
 - Standard library only in this file. Concrete methods may optionally
-  depend on third‑party libraries such as *PyMuPDF* (a.k.a. ``fitz``).
+  depend on third-party libraries such as *PyMuPDF* (a.k.a. ``fitz``).
 - Stateless API: methods receive a PDF input and return a new PDF as
-  ``bytes``; no in‑place mutation or file I/O is required by the
+  ``bytes``; no in-place mutation or file I/O is required by the
   interface (callers may choose to write the returned bytes to disk).
 
 Required interface
@@ -24,7 +24,7 @@ implement the two abstract methods:
 ``add_watermark(pdf, secret, key, position) -> bytes``
     Produce a new watermarked PDF (as ``bytes``) by embedding the
     provided secret using the given key. The optional ``position``
-    string can include method‑specific placement or strategy hints.
+    string can include method-specific placement or strategy hints.
 
 ``read_secret(pdf, key) -> str``
     Recover and return the embedded secret from the given PDF using the
