@@ -258,6 +258,9 @@ def create_app():
 
             with app.extensions["rmap_lock"]:
                 identity, expected_link, resp2 = rmap_server.receiveMsg2(msg2)
+                
+                nonce_server = rmap_server.identities[identity].nonceServer
+                rmap_server._nonce_server_index.pop(nonce_server, None)
 
         except RuntimeError as exc:
             app.logger.warning(
