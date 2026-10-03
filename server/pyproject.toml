@@ -4,7 +4,7 @@ version = "0.0.1"
 description = "PDF Watermarking platform"
 requires-python = ">=3.11"
 dependencies = [
-	"PyMuPDF==1.21.1",
+	"PyMuPDF==1.28.2",
 	"Flask==3.0.3",
 	"gunicorn==21.2.0",
 	"PyMySQL==1.1.2",
