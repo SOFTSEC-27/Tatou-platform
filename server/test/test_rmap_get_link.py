@@ -1,6 +1,7 @@
 import pytest
 from rmap import RMAPError
 from sqlalchemy import create_engine, text
+from types import SimpleNamespace
 
 import server as server_module
 from server import create_app
@@ -88,6 +89,8 @@ def prepared_rmap(app, monkeypatch, tmp_path):
     class FakeRMAPServer:
         def __init__(self):
             self.received_message = None
+            self.identities = { "Group_27": SimpleNamespace(nonceServer=123456789,),}
+            self._nonce_server_index = {123456789: "Group_27",}
 
         def receiveMsg2(self, msg2):
             self.received_message = msg2
