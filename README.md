@@ -8,7 +8,7 @@ The following instructions are meant for a bash terminal on a Linux machine. If 
 To clone the repo, you can simply run:
 
 ```bash
-git clone https://github.com/nharrand/tatou-2026.git
+git clone https://github.com/SOFTSEC-27/Tatou-platform.git
 ```
 
 Note that you should probably fork the repo and clone your own repo.
@@ -17,7 +17,7 @@ Note that you should probably fork the repo and clone your own repo.
 ### Run python unit tests
 
 ```bash
-cd tatou/server
+cd cd Tatou-platform/server
 
 # Create a python virtual environement
 python3 -m venv .venv
@@ -27,9 +27,11 @@ python3 -m venv .venv
 
 # Install the necessary dependencies
 python -m pip install -e ".[dev]"
+python -m pip install "pytest==8.4.2" "hypothesis==6.142.3" "pytest-cov==7.0.0"
 
 # Run the unit tests
 python -m pytest
+python -m pytest test --cov=src --cov-branch --cov-report=term-missing --cov-report=html:coverage-report
 ```
 
 ### Deploy
@@ -39,8 +41,11 @@ From the root of the directory:
 ```bash
 # Create a file to set environement variables like passwords.
 cp sample.env .env
+Cp flag.example flag
+Cp server\flag.example server\flag
 
 # Edit .env and pick the passwords you want
+python -c "import secrets; print(secrets.token_urlsafe(48))"
 
 # Rebuild the docker image and deploy the containers
 docker compose up --build -d
