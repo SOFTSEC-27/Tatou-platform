@@ -1,0 +1,16 @@
+{
+  "started_at_utc": "2026-10-08T21:32:17.941625+00:00",
+  "target_group": "Group_23",
+  "base_url": "http://127.0.0.1:15023",
+  "client_identity": "Group_27",
+  "endpoints": {
+    "initiate": "/api/rmap-initiate",
+    "get_link": "/api/rmap-get-link",
+    "bare_link_download_prefix": "/api/get-version/"
+  },
+  "status": "failed",
+  "responses": [],
+  "failure_phase": "preflight",
+  "error_type": "FileNotFoundError",
+  "finished_at_utc": "2026-10-08T21:32:18.177728+00:00"
+}

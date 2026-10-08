@@ -1,0 +1,43 @@
+{
+  "started_at_utc": "2026-10-08T21:23:12.505248+00:00",
+  "target_group": "Group_17",
+  "base_url": "http://127.0.0.1:15017",
+  "client_identity": "Group_27",
+  "endpoints": {
+    "initiate": "/api/rmap-initiate",
+    "get_link": "/api/rmap-get-link",
+    "bare_link_download_prefix": "/api/get-version/"
+  },
+  "status": "success",
+  "responses": [
+    {
+      "phase": "msg1",
+      "http_status": 200,
+      "content_type": "application/json",
+      "bytes": 883,
+      "sha256": "23812193901c103f7d751afc0564d190ad29f289b80ebcb219391327b520b806"
+    },
+    {
+      "phase": "msg2",
+      "http_status": 200,
+      "content_type": "application/json",
+      "bytes": 903,
+      "sha256": "9b6a59e637d56a68758f2327ef18b6267ac477be434c68a3dc1d5840e664efd8"
+    },
+    {
+      "phase": "download",
+      "http_status": 200,
+      "content_type": "application/pdf",
+      "bytes": 155347,
+      "sha256": "27db8fe0140c5dc98abb695c7e1076867da1cdb50ab2bc98f0d9a60870f0d456"
+    }
+  ],
+  "client_key_fingerprint": "EB0E2117372BD6BD6B824B647D3754208EB8185F",
+  "server_key_fingerprint": "A6DFEEA1BBB775E72F6E459E6F33688A8F18AEB4",
+  "pdf_file": "Group_17_rmap_20261008T212312Z_00a84957.pdf",
+  "pdf_bytes": 155347,
+  "pdf_sha256": "27db8fe0140c5dc98abb695c7e1076867da1cdb50ab2bc98f0d9a60870f0d456",
+  "pdf_pages": 1,
+  "watermark_independently_verified": false,
+  "finished_at_utc": "2026-10-08T21:23:22.637206+00:00"
+}
