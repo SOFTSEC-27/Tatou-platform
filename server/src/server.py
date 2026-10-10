@@ -669,7 +669,7 @@ def create_app():
             with get_engine().connect() as conn:
                 rows = conn.execute(
                     text("""
-                        SELECT v.id, v.documentid, v.link, v.intended_for, v.method
+                        SELECT v.id, v.documentid, v.link, v.intended_for, v.secret, v.method
                         FROM Documents d
                         JOIN Versions v ON d.id = v.documentid
                         WHERE d.ownerid = :uid AND d.id = :did
@@ -686,6 +686,7 @@ def create_app():
             "documentid": int(r.documentid),
             "link": r.link,
             "intended_for": r.intended_for,
+            "secret": r.secret,
             "method": r.method,
         } for r in rows]
         return jsonify({"versions": versions}), 200
@@ -699,7 +700,7 @@ def create_app():
             with get_engine().connect() as conn:
                 rows = conn.execute(
                     text("""
-                        SELECT v.id, v.documentid, v.link, v.intended_for, v.method
+                        SELECT v.id, v.documentid, v.link, v.intended_for, v.secret, v.method
                         FROM Documents d
                         JOIN Versions v ON d.id = v.documentid
                         WHERE d.ownerid = :uid
@@ -716,6 +717,7 @@ def create_app():
             "documentid": int(r.documentid),
             "link": r.link,
             "intended_for": r.intended_for,
+            "secret": r.secret,
             "method": r.method,
         } for r in rows]
         return jsonify({"versions": versions}), 200
@@ -1204,28 +1206,32 @@ def create_app():
                 request.args.get("documentid"),
                 payload.get("document_id"),
                 payload.get("documentid"),
+                payload.get("id"),
             )
-
             for candidate in candidates:
                 if candidate is not None:
                     document_id = candidate
                     break
-        version_id = payload.get("version_id")
 
+        version_id = payload.get("version_id")
         if version_id is None:
             version_id = payload.get("versionid")
 
         key = payload.get("key")
+        uploaded_mode = version_id is None and "method" in payload
 
         try:
             doc_id = int(document_id)
-            version_id = int(version_id)
+            if not uploaded_mode:
+                version_id = int(version_id)
         except (TypeError, ValueError):
             return jsonify({
                 "error": "document_id and version_id must be integers"
             }), 400
 
-        if doc_id <= 0 or version_id <= 0:
+        if doc_id <= 0 or (
+            not uploaded_mode and version_id <= 0
+        ):
             return jsonify({
                 "error": "document_id and version_id must be positive"
             }), 400
@@ -1233,25 +1239,36 @@ def create_app():
         if not isinstance(key, str) or not key:
             return jsonify({"error": "key is required"}), 400
 
-        # Look up the exact watermarked version and enforce document ownership.
+        if uploaded_mode:
+            method = payload.get("method")
+            position = payload.get("position")
+            if not isinstance(method, str) or method not in WMUtils.METHODS:
+                return jsonify({"error": "invalid watermarking method"}), 400
+            if position is not None and not isinstance(position, str):
+                return jsonify({"error": "invalid position"}), 400
+
+            query = """
+                SELECT id AS documentid, path
+                FROM Documents
+                WHERE id = :document_id AND ownerid = :user_id
+                LIMIT 1
+            """
+        else:
+            query = """
+                SELECT v.id AS version_id, v.documentid,
+                       v.path, v.method, v.position
+                FROM Versions v
+                JOIN Documents d ON d.id = v.documentid
+                WHERE v.id = :version_id
+                AND v.documentid = :document_id
+                AND d.ownerid = :user_id
+                LIMIT 1
+            """
+
         try:
             with get_engine().connect() as conn:
                 row = conn.execute(
-                    text("""
-                        SELECT
-                            v.id AS version_id,
-                            v.documentid,
-                            v.path,
-                            v.method,
-                            v.position
-                        FROM Versions v
-                        JOIN Documents d
-                        ON d.id = v.documentid
-                        WHERE v.id = :version_id
-                        AND v.documentid = :document_id
-                        AND d.ownerid = :user_id
-                        LIMIT 1
-                    """),
+                    text(query),
                     {
                         "version_id": version_id,
                         "document_id": doc_id,
@@ -1259,24 +1276,29 @@ def create_app():
                     },
                 ).first()
         except Exception:
-            app.logger.exception("Failed to look up watermark version")
+            app.logger.exception("Failed to look up watermark file")
             return jsonify({"error": "database error"}), 503
 
-        # Use the same response for a missing version and another user's version.
         if not row:
-            return jsonify({"error": "watermark version not found"}), 404
+            return jsonify({
+                "error": (
+                    "document not found" if uploaded_mode
+                    else "watermark version not found"
+                )
+            }), 404
+
+        if not uploaded_mode:
+            method = row.method
+            position = row.position
 
         storage_root = Path(app.config["STORAGE_DIR"]).resolve()
 
         try:
             file_path = _safe_resolve_under_storage(
-                str(row.path),
-                storage_root,
+                str(row.path), storage_root
             )
         except RuntimeError:
-            app.logger.error(
-                "Stored watermark version path is outside storage"
-            )
+            app.logger.error("Stored watermark path is outside storage")
             return jsonify({"error": "watermark path invalid"}), 500
 
         if not file_path.exists() or not file_path.is_file():
@@ -1284,27 +1306,28 @@ def create_app():
 
         try:
             secret = WMUtils.read_watermark(
-                method=row.method,
+                method=method,
                 pdf=str(file_path),
                 key=key,
             )
         except Exception:
             app.logger.warning(
-                "Watermark verification failed for version id=%s",
-                version_id,
+                "Watermark verification failed for document id=%s",
+                doc_id,
                 exc_info=True,
             )
-            return jsonify({
-                "error": "watermark verification failed"
-            }), 400
+            return jsonify({"error": "watermark verification failed"}), 400
 
-        return jsonify({
+        result = {
             "documentid": int(row.documentid),
-            "versionid": int(row.version_id),
             "secret": secret,
-            "method": row.method,
-            "position": row.position or None,
-        }), 200
+            "method": method,
+            "position": position or None,
+        }
+        if not uploaded_mode:
+            result["versionid"] = int(row.version_id)
+
+        return jsonify(result), 200
     
     return app
 

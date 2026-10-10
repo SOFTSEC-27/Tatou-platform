@@ -131,7 +131,7 @@ def test_list_all_versions_uses_user_id_not_login(tmp_path):
         assert links == {"attacker-private-link"}
         assert "owner-private-link" not in links
         assert "owner-secret" not in response.get_data(as_text=True)
-        assert "attacker-secret" not in response.get_data(as_text=True)
+        assert body["versions"][0]["secret"] == "attacker-secret"
     finally:
         engine.dispose()
 
