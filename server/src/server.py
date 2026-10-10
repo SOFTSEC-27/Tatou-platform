@@ -522,7 +522,10 @@ def create_app():
         if not isinstance(payload, dict):
             return jsonify({"error": "JSON object required"}), 400
 
-        email = (payload.get("email") or "").strip()
+        email = (payload.get("email") or "")
+        if not isinstance(email, str):
+            return jsonify({"error": "email must be a string"}), 400
+        email = email.strip()
         password = payload.get("password") or ""
         if not email or not password:
             return jsonify({"error": "email and password are required"}), 400
