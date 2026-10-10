@@ -4,10 +4,14 @@
 
 Tested /api/login with non-object JSON using Hypothesis and Flask test client (max_examples=100, deadline=None). Expected 400 with a JSON error and no token.
 
-1. The test reported true as a failing input: it returned 500 with an HTML page. The code called .get() on a boolean without checking the body type. Also reproduced the 500 in the browser.
+Hypothesis found missing input-type checks in login and registration: non-object request bodies and non-string login fields could cause unhandled exceptions and 500 responses. 
 
-Added a body-type check before reading fields and kept true as a fixed regression case with @example(body=True). The fuzz test passed after the fix, and all six existing login tests passed.
+## Delete-document API
+Delete-document converted ID 1.5 to 1 and returned 500 when the JSON body was true. 
 
-2. Hypothesis reported email=true returning 500 because the login code called .strip() on a boolean. Added an email type check to return 400 for non-string values, and the fuzz test passed after the fix.
+## Get-document API
+Get-document queried the database for ID 0 and returned 404. 
 
-3. Hypothesis with a mocked database reported password=true returning 500 because password hashing called .encode() on a boolean. Added a password type check to return 400; all 164 tests passed after the fix.
+## Try Grammar-based fuzzing
+Added a grammar-guided Hypothesis test for layered-identity-v1 using structured secrets, generated keys, three positions and a fixed one-page PDF (max_examples=100, deadline=None). Secret recovery, PDF readability and wrong-key rejection passed; no new bug was found, and all 170 tests passed.
+

@@ -488,8 +488,14 @@ def create_app():
     # POST /api/create-user {email, login, password}
     @app.post("/api/create-user")
     def create_user():
-        payload = request.get_json(silent=True) or {}
-        email = (payload.get("email") or "").strip().lower()
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "JSON object required"}), 400
+                            
+        email = payload.get("email", "")
+        if not isinstance(email, str):
+            return jsonify({"error": "email must be a string"}), 400
+        email = email.strip().lower()
         login = (payload.get("login") or "").strip()
         password = payload.get("password") or ""
         if not email or not login or not password:
@@ -730,19 +736,21 @@ def create_app():
         } for r in rows]
         return jsonify({"versions": versions}), 200
     
-    # GET /api/get-document or /api/get-document/<id>  → returns the PDF (inline)
+    # GET /api/get-document or /api/get-document/<id> 
     @app.get("/api/get-document")
     @app.get("/api/get-document/<int:document_id>")
     @require_auth
     def get_document(document_id: int | None = None):
-    
-        # Support both path param and ?id=/ ?documentid=
         if document_id is None:
             document_id = request.args.get("id") or request.args.get("documentid")
+            
             try:
                 document_id = int(document_id)
             except (TypeError, ValueError):
                 return jsonify({"error": "document id required"}), 400
+
+        if document_id <= 0:
+            return jsonify({"error": "document id must be positive"}), 400
         
         try:
             with get_engine().connect() as conn:
@@ -864,11 +872,9 @@ def create_app():
     def delete_document(document_id: int | None = None):
         # accept id from path, query (?id= / ?documentid=), or JSON body on POST
         if document_id is None:
-            payload = (
-                request.get_json(silent=True)
-                if request.is_json
-                else {}
-            ) or {}
+            payload = request.get_json(silent=True) if request.is_json else {}
+            if not isinstance(payload, dict):
+                return jsonify({"error": "JSON object required"}), 400
 
             candidates = (
                 request.args.get("id"),
@@ -883,6 +889,8 @@ def create_app():
                     break
         try:
             doc_id = int(document_id)
+            if isinstance(document_id, (bool, float)):
+                return jsonify({"error": "document id must be an integer"}), 400
         except (TypeError, ValueError):
             return jsonify({"error": "document id required"}), 400
         if doc_id <= 0:
