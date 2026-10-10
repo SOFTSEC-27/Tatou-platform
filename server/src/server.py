@@ -518,7 +518,10 @@ def create_app():
     # POST /api/login {login, password}
     @app.post("/api/login")
     def login():
-        payload = request.get_json(silent=True) or {}
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "JSON object required"}), 400
+
         email = (payload.get("email") or "").strip()
         password = payload.get("password") or ""
         if not email or not password:
