@@ -1,11 +1,10 @@
 import pytest
 import fitz
 
-# OBS: Byt ut "src.din_fil" mot det faktiska filnamnet, t.ex. "src.GeometricWatermark"
 from src.watermarking_zw_HMAC_method import ZwHMACWatermark
 from watermarking_method import InvalidKeyError, SecretNotFoundError, WatermarkingError
 
-# Professionella testvärden istället för hårdkodade strängar i testerna
+# Professionella testvärden istället för hårdkodade strängar i testerna 
 TEST_SECRET = "CLASSIFIED_PAYLOAD_001"
 TEST_KEY = "secure_hmac_key_2026"
 WRONG_KEY = "malicious_actor_key"
@@ -13,6 +12,7 @@ WRONG_KEY = "malicious_actor_key"
 @pytest.fixture
 def empty_pdf_bytes():
     """Generates a temporary, blank PDF in memory for testing."""
+
     doc = fitz.open()
     doc.new_page()
     return doc.tobytes()
@@ -20,6 +20,7 @@ def empty_pdf_bytes():
 @pytest.fixture
 def wm_tool():
     """Initializes the watermark class."""
+
     return ZwHMACWatermark()
 
 def test_is_applicable(wm_tool, empty_pdf_bytes):
@@ -35,19 +36,23 @@ def test_add_and_read_success(wm_tool, empty_pdf_bytes):
 def test_read_wrong_key(wm_tool, empty_pdf_bytes):
     watermarked_pdf = wm_tool.add_watermark(empty_pdf_bytes, TEST_SECRET, TEST_KEY)
     
+    # FIX: added ^ and $ to force exakt matchning from error message
+    with pytest.raises(InvalidKeyError, match="^Wrong key or manipulated watermarking$"):
+        wm_tool.read_secret(watermarked_pdf, WRONG_KEY)
+    
     with pytest.raises(InvalidKeyError, match="Wrong key or manipulated watermarking"):
         wm_tool.read_secret(watermarked_pdf, WRONG_KEY)
 
 def test_read_no_watermark(wm_tool, empty_pdf_bytes):
-    with pytest.raises(SecretNotFoundError, match="No watermark found"):
+    with pytest.raises(SecretNotFoundError, match="^No watermark found$"): #Same Fix from test_read_wrong_key
         wm_tool.read_secret(empty_pdf_bytes, TEST_KEY)
 
 def test_deterministic_and_unique(wm_tool, empty_pdf_bytes):
-    # Generera filer med två olika hemligheter
+    # Generates files with two different secrets
     pdf1 = wm_tool.add_watermark(empty_pdf_bytes, TEST_SECRET, TEST_KEY)
     pdf3 = wm_tool.add_watermark(empty_pdf_bytes, "DIFFERENT_PAYLOAD_002", TEST_KEY)
     
-    # Verifiera att filerna blir olika när hemligheten är olika
+    # Verifies the files are different with different secrets
     assert pdf1 != pdf3
 
 def test_survives_metadata_removal(wm_tool, empty_pdf_bytes):
