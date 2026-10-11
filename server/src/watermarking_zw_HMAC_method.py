@@ -160,3 +160,5 @@ class ZwHMACWatermark(WatermarkingMethod):
             raise InvalidKeyError("Wrong key or manipulated watermarking")
 
         return secret
+
+__all__ = ["ZwHMACWatermark"] 
