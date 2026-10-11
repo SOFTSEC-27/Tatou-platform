@@ -35,4 +35,6 @@ Updated the VM on dev and checked flag placement, document ownership and RMAP ke
 ## 10 October
 Returned owner watermark secrets in version lists and supported reading reuploaded PDFs without a version ID; all 161 local tests passed. Pushed the changes to dev, deployed them to the VM, and passed WatermarkLifecycle, AllMethodsLifecycle and LocalDataConsistent.
 
+Added Hypothesis API fuzz tests, fixed input validation bugs, and set up CI. Added a grammar-guided test for layered watermarks; all 170 tests passed locally.
+
 

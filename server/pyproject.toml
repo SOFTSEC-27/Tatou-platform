@@ -16,7 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest==7.0.0",
-	"mutmut==2.4.4"
+	"mutmut==2.4.4",
+	"pytest-cov==7.1.0",
+	"hypothesis==6.168.5",
 ]
 
 [tool.pytest.ini_options]
@@ -29,6 +31,6 @@ python_files = ["test_*.py"]
 pdfwm = "watermarking_cli:main"                 # now you can run `pdfwm methods`
 
 [tool.mutmut]
-paths_to_mutate = "src/watermarking_zw_HMAC_method.py"
+paths_to_mutate = "src/server.py"
 tests_dir = "test/"
-runner = "python -m pytest test/test_zwhmac_watermark.py"
+runner = "python -m pytest test/"
