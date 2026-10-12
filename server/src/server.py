@@ -53,10 +53,7 @@ def create_app():
     )
     app.config["RMAP_IDENTITIES_DIR"] = os.environ.get("RMAP_IDENTITIES_DIR")
     app.config["RMAP_DOCUMENT_ID"] = os.environ.get("RMAP_DOCUMENT_ID")
-    app.config["RMAP_LINK_PREFIX"] = os.environ.get(
-        "RMAP_LINK_PREFIX",
-        "/api/get-version/",
-    )
+    app.config["RMAP_LINK_PREFIX"] = ""
     app.config["RMAP_WATERMARK_METHOD"] = os.environ.get(
         "RMAP_WATERMARK_METHOD",
         "layered-identity-v1",
