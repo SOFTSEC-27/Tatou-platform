@@ -4,7 +4,6 @@ import fitz
 from src.watermarking_zw_HMAC_method import ZwHMACWatermark
 from watermarking_method import InvalidKeyError, SecretNotFoundError, WatermarkingError
 
-# Professionella testvärden istället för hårdkodade strängar i testerna 
 TEST_SECRET = "CLASSIFIED_PAYLOAD_001"
 TEST_KEY = "secure_hmac_key_2026"
 WRONG_KEY = "malicious_actor_key"
@@ -74,4 +73,11 @@ def test_tampering_is_rejected(wm_tool, empty_pdf_bytes):
     
     # The HMAC or UTF-8 decoding should immediately fail
     with pytest.raises((InvalidKeyError, WatermarkingError)):
+        wm_tool.read_secret(tampered, TEST_KEY)
+
+def test_illegal_characters_in_payload_is_rejected(wm_tool, empty_pdf_bytes):
+    watermarked = wm_tool.add_watermark(empty_pdf_bytes, TEST_SECRET, TEST_KEY)
+    tampered = watermarked.replace(b"~", b"X", 1) 
+    
+    with pytest.raises((WatermarkingError, SecretNotFoundError)):
         wm_tool.read_secret(tampered, TEST_KEY)

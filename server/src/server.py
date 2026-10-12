@@ -75,7 +75,7 @@ def create_app():
     # --- DB engine only (no Table metadata) ---
     def db_url() -> str:
         return (
-            f"XXmysql+pymysql://{app.config['DB_USER']}:{app.config['DB_PASSWORD']}XX"
+            f"mysql+pymysql://{app.config['DB_USER']}:{app.config['DB_PASSWORD']}"
             f"@{app.config['DB_HOST']}:{app.config['DB_PORT']}/{app.config['DB_NAME']}?charset=utf8mb4"
         )
 
