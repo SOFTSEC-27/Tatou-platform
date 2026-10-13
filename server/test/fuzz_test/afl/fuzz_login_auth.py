@@ -1,16 +1,3 @@
-"""AFL login campaign with one known account and an authentication oracle.
-
-Place at <repo>/fuzz/afl/fuzz_login_auth.py.
-Prepare: python fuzz/afl/fuzz_login_auth.py --prepare fuzz/afl/seeds_login_auth
-Replay:  python fuzz/afl/fuzz_login_auth.py --replay input.json
-Fuzz: py-afl-fuzz -i seeds -o findings -G 4096 -- python fuzz_login_auth.py @@
-
-Scope: request parsing, known/unknown accounts, real password-hash checking,
-and the returned token's signature and identity. Uses SQLite, not live MariaDB.
-The oracle uses the API's existing email.strip() normalization; passwords
-are compared exactly. Token expiration and protected routes are not tested.
-"""
-
 import argparse
 import json
 import logging
@@ -33,7 +20,7 @@ ACCOUNT_LOGIN = "afl-user"
 ACCOUNT_PASSWORD = "AflTestOnly123!"
 TOKEN_TTL = 3600
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "server" / "src"))
 os.environ["SECRET_KEY"] = TEST_SECRET
 _storage = TemporaryDirectory(prefix="tatou-afl-auth-")

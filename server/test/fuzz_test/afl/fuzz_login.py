@@ -1,14 +1,3 @@
-"""AFL login request-body campaign using an empty SQLite database.
-
-Place at <repo>/fuzz/afl/fuzz_login.py. No live HTTP server is used.
-Replay: python fuzz/afl/fuzz_login.py --replay input.json
-Fuzz: py-afl-fuzz -i seeds -o findings -- python fuzz/afl/fuzz_login.py @@
-
-Scope: raw JSON parsing, field validation and unknown-user lookup.
-An empty database means this campaign cannot test successful authentication
-or password-hash verification against an existing account.
-"""
-
 import argparse
 import logging
 import os
@@ -21,7 +10,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT / "server" / "src"))
 # Set test configuration BEFORE importing server, which creates a WSGI app.
 os.environ["SECRET_KEY"] = "afl-login-test-only-secret"

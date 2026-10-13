@@ -1,12 +1,3 @@
-"""AFL full normal lifecycle for layered-identity-v1, via real Flask routes.
-
-Place this file and lifecycle_mutator.py in <repo>/fuzz/afl/.
-Prepare/replay run without AFL instrumentation. Fuzz mode uses python-afl.
-SQLite adapts UNHEX/LAST_INSERT_ID, not application/watermark behavior.
-Native PyMuPDF code is executed but is not instrumented by python-afl.
-RMAP, malformed API inputs and other watermark methods are outside scope.
-"""
-
 import argparse
 import io
 import json
@@ -23,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 
 from lifecycle_mutator import DEFAULT, encode, valid_case
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / "server" / "src"))
 TEST_SECRET = "afl-lifecycle-test-only-secret"
 TEST_PASSWORD = "AflLifecycleOnly123!"
