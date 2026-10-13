@@ -2783,6 +2783,14 @@ def test_delete_document_requires_authentication(
             "document id required",
         ),
         (
+            [],
+            "JSON object required", #FIX: mutant 719, checks that payload isnt a list
+        ),
+        ( 
+            {"id": 1.5}, 
+            "document id must be an integer", #FIX: mutant 731, checking for integer now
+        ),
+        (
             {"id": 0},
             "document id must be positive",
         ),
