@@ -2065,7 +2065,24 @@ def test_read_watermark_requires_positive_ids(
         )
     }
 
+def test_read_watermark_accepts_boundary_id_1(prepared_read_app): #FIX: for mutant 1025, verifies that the lowest valid boundary value passes
+    test_app = prepared_read_app["app"]
+    client = test_app.test_client()
+    token = make_token(test_app, user_id=100)
 
+    response = client.post(
+        "/api/read-watermark",
+        json={
+            "document_id": 1,
+            "version_id": 1, 
+            "key": "correct-key",
+        },
+        headers=authorization_header(token),
+    )
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "error": "watermark version not found"
+    }
 @pytest.mark.parametrize(
     "invalid_key",
     [
