@@ -914,7 +914,7 @@ def test_get_document_returns_owned_pdf(
         "",
     )
 
-    assert cache_control == "private, max-age=0, must-revalidate"
+    assert cache_control == "private, max-age=0, must-revalidate" #FIX: mutant 664, tighter security check
     assert response.headers.get("ETag")
 
 
@@ -2568,8 +2568,7 @@ def test_get_version_returns_pdf_for_valid_capability_link(
         "",
     )
 
-    assert "private" in cache_control
-    assert "max-age=0" in cache_control
+    assert cache_control == "private, max-age=0" #FIX: mutant 694, exact matching of security headers
 
 
 def test_get_version_rejects_unknown_capability_link(
