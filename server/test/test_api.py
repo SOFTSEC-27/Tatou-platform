@@ -914,8 +914,7 @@ def test_get_document_returns_owned_pdf(
         "",
     )
 
-    assert "private" in cache_control
-    assert "must-revalidate" in cache_control
+    assert cache_control == "private, max-age=0, must-revalidate"
     assert response.headers.get("ETag")
 
 
