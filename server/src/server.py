@@ -110,7 +110,7 @@ def create_app():
     def _sha256_file(path: Path) -> str:
         h = hashlib.sha256()
         with path.open("rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):  # pragma: no mutate
                 h.update(chunk)
         return h.hexdigest()
 
@@ -1347,7 +1347,7 @@ def create_app():
 # WSGI entrypoint
 app = create_app()
 
-if __name__ == "__main__":
+if __name__ == "__main__": # pragma: no mutate
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
