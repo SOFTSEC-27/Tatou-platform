@@ -209,3 +209,8 @@ __marimo__/
 # Deployment flags never commit real values
 /flag
 /server/flag
+
+#AFL ignore
+findings_*/
+__pycache__/
+*.pyc

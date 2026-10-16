@@ -37,4 +37,8 @@ Returned owner watermark secrets in version lists and supported reading reupload
 
 Added Hypothesis API fuzz tests, fixed input validation bugs, and set up CI. Added a grammar-guided test for layered watermarks; all 170 tests passed locally.
 
+## 12 October
+Try to run testbench provided by professor, and fix the problem of the rmap-get-link. We delete the full route of the request and replace the only concatenated nonces. Also update the RMAP version to 2.0.
+
+
 
