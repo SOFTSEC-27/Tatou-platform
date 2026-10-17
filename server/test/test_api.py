@@ -803,9 +803,9 @@ def test_list_versions_returns_only_owned_document_versions(
 
     # The protected watermark secret must never
     # appear in a version-list response.
-    assert "secret" not in versions[0]
+    assert versions[0]["secret"] == "owner-secret-must-not-leak"
     assert (
-        "owner-secret-must-not-leak"
+        "other-secret-must-not-leak"
         not in response.get_data(as_text=True)
     )
 
@@ -883,16 +883,9 @@ def test_list_all_versions_returns_only_owned_versions(
     assert versions[0]["id"] == 10
     assert versions[0]["documentid"] == 1
 
-    assert all(
-        "secret" not in version
-        for version in versions
-    )
+    assert versions[0]["secret"] == "owner-secret-must-not-leak"
 
-    response_text = response.get_data(
-        as_text=True
-    )
-
-    assert "owner-secret-must-not-leak" not in response_text
+    response_text = response.get_data(as_text=True)
     assert "other-secret-must-not-leak" not in response_text
 
 
@@ -921,8 +914,7 @@ def test_get_document_returns_owned_pdf(
         "",
     )
 
-    assert "private" in cache_control
-    assert "must-revalidate" in cache_control
+    assert cache_control == "private, max-age=0, must-revalidate" #FIX: mutant 664, tighter security check
     assert response.headers.get("ETag")
 
 
@@ -2072,7 +2064,24 @@ def test_read_watermark_requires_positive_ids(
         )
     }
 
+def test_read_watermark_accepts_boundary_id_1(prepared_read_app): #FIX: for mutant 1025, verifies that the lowest valid boundary value passes
+    test_app = prepared_read_app["app"]
+    client = test_app.test_client()
+    token = make_token(test_app, user_id=100)
 
+    response = client.post(
+        "/api/read-watermark",
+        json={
+            "document_id": 1,
+            "version_id": 1, 
+            "key": "correct-key",
+        },
+        headers=authorization_header(token),
+    )
+    assert response.status_code == 404
+    assert response.get_json() == {
+        "error": "watermark version not found"
+    }
 @pytest.mark.parametrize(
     "invalid_key",
     [
@@ -2559,8 +2568,7 @@ def test_get_version_returns_pdf_for_valid_capability_link(
         "",
     )
 
-    assert "private" in cache_control
-    assert "max-age=0" in cache_control
+    assert cache_control == "private, max-age=0" #FIX: mutant 694, exact matching of security headers
 
 
 def test_get_version_rejects_unknown_capability_link(
@@ -2771,6 +2779,14 @@ def test_delete_document_requires_authentication(
         (
             {"id": "invalid"},
             "document id required",
+        ),
+        (
+            [],
+            "JSON object required", #FIX: mutant 719, checks that payload isnt a list
+        ),
+        ( 
+            {"id": 1.5}, 
+            "document id must be an integer", #FIX: mutant 731, checking for integer now
         ),
         (
             {"id": 0},
@@ -3129,3 +3145,87 @@ def test_delete_document_restores_files_when_database_delete_fails(
                 FROM Versions
             """)
         ).scalar_one() == 2
+
+def test_lifecycle_list_versions_includes_owner_secret(
+    create_watermark_api_app,
+):
+    test_app = create_watermark_api_app["app"]
+    client = test_app.test_client()
+    headers = authorization_header(
+        make_token(test_app, user_id=100)
+    )
+    payload = watermark_request_payload()
+
+    created = client.post(
+        "/api/create-watermark/1",
+        json=payload,
+        headers=headers,
+    )
+    assert created.status_code == 201, created.get_json()
+
+    listed = client.get(
+        "/api/list-versions/1",
+        headers=headers,
+    )
+    assert listed.status_code == 200, listed.get_json()
+
+    versions = listed.get_json()["versions"]
+    matching = [
+        version for version in versions
+        if version["id"] == created.get_json()["id"]
+    ]
+
+    assert len(matching) == 1
+    assert matching[0].get("secret") == payload["secret"], matching[0]
+
+
+def test_lifecycle_read_reuploaded_pdf_without_version_id(
+    prepared_read_app,
+):
+    test_app = prepared_read_app["app"]
+    client = test_app.test_client()
+
+    # Represent the downloaded PDF uploaded as a new document.
+    uploaded_path = (
+        prepared_read_app["original_path"].parent / "reuploaded.pdf"
+    )
+    uploaded_path.write_bytes(
+        prepared_read_app["version_path"].read_bytes()
+    )
+
+    with prepared_read_app["engine"].begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO Documents (id, name, path, ownerid)
+                VALUES (120, 'reuploaded.pdf', :path, 100)
+            """),
+            {"path": str(uploaded_path)},
+        )
+
+    response = client.post(
+        "/api/read-watermark",
+        json={
+            "id": 120,
+            "method": "layered-identity-v1",
+            "position": "center",
+            "key": "correct-key",
+        },
+        headers=authorization_header(
+            make_token(test_app, user_id=100)
+        ),
+    )
+
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+
+    assert body["documentid"] == 120
+    assert body["secret"] == "Test_Group"
+    assert body["method"] == "layered-identity-v1"
+    assert prepared_read_app["captured"]["pdf"] == str(
+        uploaded_path.resolve()
+    )
+    assert prepared_read_app["captured"]["key"] == "correct-key"
+    assert (
+        prepared_read_app["captured"]["method"]
+        == "layered-identity-v1"
+    )

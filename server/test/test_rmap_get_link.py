@@ -1,6 +1,7 @@
 import pytest
 from rmap import RMAPError
 from sqlalchemy import create_engine, text
+from types import SimpleNamespace
 
 import server as server_module
 from server import create_app
@@ -88,6 +89,8 @@ def prepared_rmap(app, monkeypatch, tmp_path):
     class FakeRMAPServer:
         def __init__(self):
             self.received_message = None
+            self.identities = { "Group_27": SimpleNamespace(nonceServer=123456789,),}
+            self._nonce_server_index = {123456789: "Group_27",}
 
         def receiveMsg2(self, msg2):
             self.received_message = msg2
@@ -276,3 +279,115 @@ def test_rmap_get_link_removes_file_when_insert_fails(
     )
 
     assert not destination_path.exists()
+
+@pytest.mark.parametrize(
+    "legacy_prefix",
+    [None, "/api/get-version/"],
+    ids=["default", "legacy-env"],
+)
+def test_rmap_get_link_returns_bare_nonce_pair(
+    prepared_rmap,
+    monkeypatch,
+    tmp_path,
+    legacy_prefix,
+):
+    from pgpy import PGPKey, PGPUID
+    from pgpy.constants import (
+        CompressionAlgorithm,
+        HashAlgorithm,
+        KeyFlags,
+        PubKeyAlgorithm,
+        SymmetricKeyAlgorithm,
+    )
+    from rmap import RMAPClient
+
+    def make_test_key(name):
+        key = PGPKey.new(PubKeyAlgorithm.RSAEncryptOrSign, 2048)
+        key.add_uid(
+            PGPUID.new(name),
+            usage={
+                KeyFlags.Sign,
+                KeyFlags.EncryptCommunications,
+                KeyFlags.EncryptStorage,
+            },
+            hashes=[HashAlgorithm.SHA256],
+            ciphers=[SymmetricKeyAlgorithm.AES256],
+            compression=[CompressionAlgorithm.ZLIB],
+        )
+        return key
+
+    server_key = make_test_key("TestServer")
+    client_key = make_test_key("Group_27")
+
+    server_private = tmp_path / "server_private.asc"
+    server_public = tmp_path / "server_public.asc"
+    client_private = tmp_path / "client_private.asc"
+    identities = tmp_path / "identities"
+    identities.mkdir()
+
+    server_private.write_text(str(server_key), encoding="utf-8")
+    server_public.write_text(str(server_key.pubkey), encoding="utf-8")
+    client_private.write_text(str(client_key), encoding="utf-8")
+    (identities / "Group_27.asc").write_text(
+        str(client_key.pubkey),
+        encoding="utf-8",
+    )
+
+    if legacy_prefix is None:
+        monkeypatch.delenv("RMAP_LINK_PREFIX", raising=False)
+    else:
+        monkeypatch.setenv("RMAP_LINK_PREFIX", legacy_prefix)
+
+    # A fresh app uses the real RMAP server instead of FakeRMAPServer.
+    real_app = create_app()
+    real_app.config.update(
+        TESTING=True,
+        _ENGINE=prepared_rmap["engine"],
+        STORAGE_DIR=tmp_path,
+        RMAP_SERVER_PUBLIC_KEY_PATH=str(server_public),
+        RMAP_SERVER_PRIVATE_KEY_PATH=str(server_private),
+        RMAP_PRIVATE_KEY_PASSPHRASE=None,
+        RMAP_IDENTITIES_DIR=str(identities),
+        RMAP_DOCUMENT_ID="1",
+        RMAP_WATERMARK_METHOD="layered-identity-v1",
+        RMAP_WATERMARK_POSITION="center",
+        WATERMARK_HMAC_KEY="test-hmac-key",
+    )
+    http_client = real_app.test_client()
+
+    rmap_client = RMAPClient(
+        identity="Group_27",
+        client_private_key_path=str(client_private),
+        server_public_key_path=str(server_public),
+    )
+
+    response1 = http_client.post(
+        "/api/rmap-initiate",
+        json=rmap_client.build_msg1(),
+    )
+    assert response1.status_code == 200, response1.get_json()
+
+    nonce_client, nonce_server = rmap_client.process_resp1(
+        response1.get_json()
+    )
+
+    response2 = http_client.post(
+        "/api/rmap-get-link",
+        json=rmap_client.build_msg2(),
+    )
+    assert response2.status_code == 200, response2.get_json()
+
+    result = rmap_client.process_resp2(response2.get_json())
+    expected = f"{nonce_client:016x}{nonce_server:016x}"
+
+    # Check the decrypted result, not just the encrypted response wrapper.
+    assert result == expected
+    assert len(result) == 32
+
+    # The stored download token must match the returned nonce pair.
+    with prepared_rmap["engine"].connect() as conn:
+        stored_link = conn.execute(
+            text("SELECT link FROM Versions")
+        ).scalar_one()
+
+    assert stored_link == result

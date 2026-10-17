@@ -131,6 +131,8 @@ class ZwHMACWatermark(WatermarkingMethod):
                 binary_string += "0"
             elif char == "^":
                 binary_string += "1"
+            else: # FIX: forbids illegal characters
+                raise WatermarkingError("Corrupted payload: illegal characters detected")
         if not binary_string:
             raise SecretNotFoundError("No watermark found")
 
@@ -160,3 +162,5 @@ class ZwHMACWatermark(WatermarkingMethod):
             raise InvalidKeyError("Wrong key or manipulated watermarking")
 
         return secret
+
+__all__ = ["ZwHMACWatermark"] 
