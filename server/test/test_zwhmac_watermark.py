@@ -38,9 +38,6 @@ def test_read_wrong_key(wm_tool, empty_pdf_bytes):
     # FIX: added ^ and $ to force exakt matchning from error message
     with pytest.raises(InvalidKeyError, match="^Wrong key or manipulated watermarking$"):
         wm_tool.read_secret(watermarked_pdf, WRONG_KEY)
-    
-    with pytest.raises(InvalidKeyError, match="Wrong key or manipulated watermarking"):
-        wm_tool.read_secret(watermarked_pdf, WRONG_KEY)
 
 def test_read_no_watermark(wm_tool, empty_pdf_bytes):
     with pytest.raises(SecretNotFoundError, match="^No watermark found$"): #Same Fix from test_read_wrong_key
