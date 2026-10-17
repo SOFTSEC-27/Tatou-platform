@@ -1,4 +1,4 @@
-# tatou
+# Tatou
 A web platform for pdf watermarking. This project is intended for pedagogical use, and contain security vulnerabilities. Do not deploy on an open network.
 
 ## Instructions
@@ -11,53 +11,93 @@ To clone the repo, you can simply run:
 git clone https://github.com/SOFTSEC-27/Tatou-platform.git
 ```
 
-Note that you should probably fork the repo and clone your own repo.
+## Install and run tests
 
+### Linux / Bash
 
-### Run python unit tests
+From the repository root:
 
 ```bash
-cd cd Tatou-platform/server
-
-# Create a python virtual environement
+cd server
 python3 -m venv .venv
-
-# Activate your virtual environement
-. .venv/bin/activate
-
-# Install the necessary dependencies
+source .venv/bin/activate
 python -m pip install -e ".[dev]"
 python -m pip install "pytest==8.4.2" "hypothesis==6.142.3" "pytest-cov==7.0.0"
 
-# Run the unit tests
-python -m pytest
+python -m pytest test
+```
+
+### Windows / PowerShell
+
+From the repository root:
+
+```powershell
+cd server
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+python -m pip install "pytest==8.4.2" "hypothesis==6.142.3" "pytest-cov==7.0.0"
+
+python -m pytest test
+```
+
+### Coverage report
+
+From `server`, with the Python environment activated:
+
+```bash
 python -m pytest test --cov=src --cov-branch --cov-report=term-missing --cov-report=html:coverage-report
 ```
 
-### Deploy
+## Deploy with Docker Compose
 
-From the root of the directory:
+### Linux / Bash
 
 ```bash
-# Create a file to set environement variables like passwords.
 cp sample.env .env
-Cp flag.example flag
-Cp server\flag.example server\flag
-
-# Edit .env and pick the passwords you want
-python -c "import secrets; print(secrets.token_urlsafe(48))"
-
-# Rebuild the docker image and deploy the containers
-docker compose up --build -d
-
-# Monitor logs in realtime 
-docker compose logs -f
-
-# Test if the API is up
-http -v :5000/healthz
-
-# Open your browser at 127.0.0.1:5000 to check if the website is up.
+cp flag.example flag
+cp server/flag.example server/flag
 ```
+
+### Windows / PowerShell
+
+```powershell
+Copy-Item sample.env .env
+Copy-Item flag.example flag
+Copy-Item server/flag.example server/flag
+```
+
+Edit `.env` to set the required passwords and deployment settings. Generate a
+secret with the following command and set it as `SECRET_KEY` in `.env`:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+The example flag files are for local setup. Real deployment flags, credentials
+and private keys must stay outside Git. RMAP operation also requires the server
+keys and trusted identity keys configured for the deployment.
+
+Build and start the containers:
+
+```bash
+docker compose up --build -d
+docker compose logs -f
+```
+
+Check the API from another terminal:
+
+```bash
+# Linux / Bash
+curl http://127.0.0.1:5000/healthz
+```
+
+```powershell
+# Windows / PowerShell
+curl.exe -i "http://127.0.0.1:5000/healthz"
+```
+
+Open <http://127.0.0.1:5000> to access the website.
 
 
 
